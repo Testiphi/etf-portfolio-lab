@@ -21,37 +21,69 @@ def _panel(seed: int = 3, n: int = 600, cols: tuple[str, ...] = ("a", "b", "c"))
 # --------------------------------------------------------------------------- #
 # 收益归因与风险贡献
 # --------------------------------------------------------------------------- #
-def test_arithmetic_contribution_sums_to_daily_return_sum() -> None:
-    """算术贡献的各项之和 = 各日组合收益之和（这条是精确的）。
-
-    注意两种精度：``return_contribution_sum`` 由未舍入的值求和后再舍入，因此可以严格对齐；
-    而逐项展示用的 ``return_contribution`` 为控制 JSON 体积舍入到 8 位小数，
-    把它们相加会带 ~1e-8 的舍入噪声——这正是归因面板必须单独给出"加总"数值的原因。
-    """
+def test_log_contribution_sums_to_weighted_log_returns() -> None:
+    """对数贡献的各项之和 = Σ_t Σᵢ wᵢ·ln(1+rᵢₜ)（构造上精确）。"""
     panel = _panel()
     weights = {"a": 0.5, "b": 0.3, "c": 0.2}
     risk = static_site._risk_contribution(panel, weights)
 
-    expected = float((panel.mul(pd.Series(weights), axis=1)).sum(axis=1).sum())
-    # 返回值统一舍入到 8 位小数（控制 JSON 体积），因此对齐精度按 1e-8 而非 1e-9
-    assert risk["return_contribution_sum"] == pytest.approx(expected, abs=1e-8)
-    assert sum(risk["return_contribution"].values()) == pytest.approx(expected, abs=1e-7)
+    expected = float((np.log1p(panel).mul(pd.Series(weights), axis=1)).sum(axis=1).sum())
+    # 返回值统一舍入到 8 位小数，因此对齐精度按 1e-8 而非 1e-9
+    assert risk["log_contribution_sum"] == pytest.approx(expected, abs=1e-8)
+    assert sum(risk["log_contribution"].values()) == pytest.approx(expected, abs=1e-7)
 
 
-def test_arithmetic_contribution_differs_from_compounded_return() -> None:
-    """归因之和**不等于**复利后的累计收益——这个差额必须如实展示，不能假装精确。
+def test_log_contribution_is_smaller_than_arithmetic_on_a_zigzag() -> None:
+    """确定性构造：涨 10% 与跌 10% 交替出现。
 
-    这正是归因的固有难点：算术贡献加总与复利累计之间差一个交叉项。
+    - 算术贡献 Σr = 0（涨跌完全抵消）
+    - 对数贡献 Σln(1+r) = n/2 × ln(0.99) < 0
+
+    两者都不可能"拱到屏幕外"，且差值恰是波动拖累：**同样的行情，
+    按算术算是不赚不亏，按对数算是在亏钱**——这正是长周期组合里
+    算术贡献会被各标的自身波动主导、量级无法解读的原因。
     """
-    panel = _panel(seed=11)
+    n = 1000
+    levels = pd.Series([0.10 if i % 2 == 0 else -0.10 for i in range(n)])
+    panel = pd.DataFrame({"a": levels.to_numpy()}, index=pd.date_range("2010-01-01", periods=n, freq="B"))
+
+    risk = static_site._risk_contribution(panel, {"a": 1.0})
+
+    arithmetic = float(panel["a"].sum())
+    logarithmic = risk["log_contribution"]["a"]
+    assert arithmetic == pytest.approx(0.0, abs=1e-12)
+    assert logarithmic == pytest.approx((n / 2) * np.log(0.99), rel=1e-6)
+    assert logarithmic < arithmetic
+
+
+def test_log_contribution_is_below_arithmetic_for_steady_positive_returns() -> None:
+    """确定性构造：涨 1% 与涨 2% 交替，恒为正收益。
+
+    算术和 Σr = n/2 × 3% 恒大于对数和 Σln = n/2 × ln(1.01×1.02)，
+    差额同样是波动（这里是离散复利）造成的。
+    """
+    n = 1000
+    levels = pd.Series([0.01 if i % 2 == 0 else 0.02 for i in range(n)])
+    panel = pd.DataFrame({"a": levels.to_numpy()}, index=pd.date_range("2010-01-01", periods=n, freq="B"))
+
+    risk = static_site._risk_contribution(panel, {"a": 1.0})
+
+    arithmetic = float(panel["a"].sum())
+    logarithmic = risk["log_contribution"]["a"]
+    assert arithmetic == pytest.approx(n / 2 * 0.03, rel=1e-9)
+    assert logarithmic == pytest.approx(n / 2 * np.log(1.01 * 1.02), rel=1e-9)
+    assert logarithmic < arithmetic
+
+
+def test_rebalancing_effect_follows_jensen_inequality() -> None:
+    """对数贡献之和 ≤ 组合实际对数收益（Jensen 不等式），差额即再平衡/分散化效应，恒非负。"""
+    panel = _panel(seed=23, n=1000)
     weights = {"a": 0.5, "b": 0.3, "c": 0.2}
     risk = static_site._risk_contribution(panel, weights)
 
-    portfolio_returns = panel.mul(pd.Series(weights), axis=1).sum(axis=1)
-    compounded = float((1.0 + portfolio_returns).prod() - 1.0)
-    assert risk["return_contribution_sum"] != pytest.approx(compounded, rel=1e-6)
-    # 量级应当接近，否则说明分解写错了
-    assert abs(risk["return_contribution_sum"] - compounded) < 0.05
+    portfolio_log = float(np.log1p(panel.mul(pd.Series(weights), axis=1).sum(axis=1)).sum())
+    assert portfolio_log >= risk["log_contribution_sum"]
+    assert portfolio_log - risk["log_contribution_sum"] > 0
 
 
 def test_component_var_shares_sum_to_one() -> None:

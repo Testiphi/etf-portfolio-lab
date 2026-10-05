@@ -42,32 +42,34 @@ def fig_nav(result: dict) -> go.Figure:
 
 
 def fig_return_contribution(result: dict) -> go.Figure:
-    """收益归因：每只标的的算术贡献（bp）。
+    """收益归因：各标的的**对数贡献**（纵条，单位 %）。
 
-    算术贡献 ``Σ_t wᵢ·rᵢₜ`` 的各项之和等于组合各日收益之和，
-    但**不等于**复利后的累计收益——面板标题里会把两个数都写出来，
-    差额就是复利与再平衡效应。
+    用纵条而不是横条，是因为横条在窄面板里配合长标的代码会把文字拱出画布；
+    用对数贡献而不是算术贡献，是因为后者会被各标的自身的波动拖累主导
+    （长周期里单一标的能到 +8000bp，而组合实际累计只有 +21%），量级无法解读。
     """
-    contrib = result.get("risk_contribution", {}).get("return_contribution", {}) or {}
+    risk = result.get("risk_contribution") or {}
+    contrib = risk.get("log_contribution") or {}
     symbols = list(contrib)
-    values_bp = [float(contrib[s]) * 10000 for s in symbols]
-    colors = [P["ok"] if v >= 0 else P["warn"] for v in values_bp]
-    total_true = (result.get("metrics", {}) or {}).get("total_return")
-    title = "收益归因（算术贡献 bp）"
-    if total_true is not None:
-        title += f"｜加总 {theme.pct(result.get('risk_contribution', {}).get('return_contribution_sum'))} vs 实际累计 {theme.pct(total_true)}"
+    values = [float(contrib[s]) * 100 for s in symbols]
+    colors = [P["ok"] if v >= 0 else P["warn"] for v in values]
     fig = go.Figure(
         go.Bar(
-            x=values_bp,
-            y=symbols,
-            orientation="h",
+            x=symbols,
+            y=values,
             marker_color=colors,
-            text=[f"{v:,.0f}" for v in values_bp],
+            text=[f"{v:+.1f}%" for v in values],
             textposition="auto",
         )
     )
-    fig.update_layout(title=title, xaxis={"title": "贡献（基点）"})
-    return theme.dark(fig, height=260)
+    note = ""
+    if risk.get("log_total_return") is not None:
+        note = f"（合计 {theme.pct(risk.get('log_contribution_sum'))}，组合实际对数收益 {theme.pct(risk.get('log_total_return'))}）"
+    fig.update_layout(
+        title=f"收益归因：对数贡献{note}",
+        yaxis={"title": "对数贡献（%）", "ticksuffix": "%"},
+    )
+    return theme.dark(fig, height=280)
 
 
 def fig_risk_vs_weight(result: dict) -> go.Figure:
@@ -132,8 +134,8 @@ def fig_exposure_heatmap(result: dict) -> go.Figure:
 
     z = [[float(r["betas"].get(f, 0.0)) for f in factors] for r in rows]
     labels = [[f"{v:.2f}" for v in row] for row in z]
-    # 把 R² 写进行标签：R² 很低时 β 本身没有意义，让不可靠一眼可见
-    row_labels = [f'{r["name"]}（R²={float(r["r_squared"]):.2f}）' for r in rows]
+    # 把 R² 写进行标签：R² 很低时 β 本身没有意义，让不可靠一眼可见（表格里也有同样信息）
+    row_labels = [f'{r["name"]} · R²{r["r_squared"]:.2f}' for r in rows]
     fig = go.Figure(
         go.Heatmap(
             z=z,

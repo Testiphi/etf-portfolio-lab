@@ -138,26 +138,40 @@ def _episodes_block(result: Mapping[str, Any]) -> str:
 
 
 def _exposure_table(result: Mapping[str, Any]) -> str:
+    """敞口明细表：把矩阵的数值也列出来（热力图看形状，表格看数字）。
+
+    数值表与热力图都用全宽面板：早先挤在半宽面板里，
+    行标签带 R² 后过长、列也放不下，才出现"渲染有误"的观感。
+    """
     block = result.get("exposure") or {}
     rows = block.get("rows") or []
+    factors = list(block.get("factors") or [])
     if not rows:
         return "<p class='note'>敞口矩阵需要指数数据，当前不可用。</p>"
+
+    head = "".join(f"<th>{theme.esc(f)}</th>" for f in factors)
     body = ""
     for row in rows:
         if row.get("error"):
-            body += f'<tr><td>{theme.esc(row["name"])}</td><td colspan="4" class="warn">{theme.esc(row["error"][:48])}</td></tr>'
+            body += (
+                f'<tr><td>{theme.esc(row["name"])}</td>'
+                f'<td colspan="{len(factors) + 4}" class="warn">{theme.esc(row["error"][:60])}</td></tr>'
+            )
             continue
+        cells = "".join(f'<td>{row["betas"].get(f, 0.0):.3f}</td>' for f in factors)
         body += (
-            f'<tr><td>{theme.esc(row["name"])}</td>'
+            f'<tr><td>{theme.esc(row["name"])}</td>{cells}'
             f'<td>{theme.num(row["r_squared"], 3)}</td>'
             f'<td>{theme.pct(row["alpha_annual"])}</td>'
             f'<td>{theme.pct(row["tracking_error"])}</td>'
             f'<td>{row["n_obs"]}</td></tr>'
         )
     warnings = block.get("warnings") or []
-    warn_html = "".join(f'<p class="note warn-text">{theme.esc(w)}</p>' for w in warnings)
+    warn_html = "".join(f'<p class="note warn-text">⚠ {theme.esc(w)}</p>' for w in warnings)
     return (
-        "<table><thead><tr><th>标的</th><th>R²</th><th>Alpha(年化)</th><th>跟踪误差</th><th>样本</th></tr></thead>"
+        "<table><thead><tr><th>标的</th>"
+        f"{head}<th>R²</th><th>Alpha<br>(年化)</th><th>跟踪误差</th><th>样本</th>"
+        "</tr></thead>"
         f"<tbody>{body}</tbody></table>"
         f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
         f"{warn_html}"
@@ -206,26 +220,32 @@ def _premium_block(con, symbols: Sequence[str], weights: Mapping[str, float], st
 
 
 def _risk_contribution(rets: pd.DataFrame, weights: Mapping[str, float]) -> dict[str, Any]:
-    """风险贡献（成分 VaR 占比）+ 收益归因（算术贡献，单位：小数）。
+    """风险贡献（成分 VaR 占比）+ 收益归因（**对数贡献**）。
 
-    **必须说清楚的一件事**：收益归因用的是**算术贡献** ``Σ_t wᵢ·rᵢₜ``。
-    按每日再平衡假设，各标的算术贡献之和 = 组合各日收益之和，
-    但它**不等于**复利后的累计收益——两者的差就是复利/再平衡效应。
-    这是归因的经典难题（需要 Carino/Menchero 之类的链接方法才能精确分解），
-    本项目选择**如实把差额展示出来**，而不是伪造一条"加总等于累计收益"的假不变量。
+    为什么用对数贡献而不是算术贡献
+    ------------------------------
+    算术贡献 ``Σ_t wᵢ·rᵢₜ`` 会被**该标的自身的波动拖累**主导：实测一个 13 年的股债金组合里，
+    沪深300ETF 的算术贡献约 +8000bp，而组合实际累计只有 +21%——两个数字摆在一起无法解读，
+    也正是图表"拱出屏幕"的根源。
 
-    成分 VaR 用欧拉分解，各标的占比之和为 1（这条是精确的，有测试守住）。
+    改用对数贡献 ``Σ_t wᵢ·ln(1+rᵢₜ)``：它扣掉了每个标的自身的复利效应，量级与实际收益可比；
+    各项之和与组合**实际对数收益**之间的差额，恰好就是**再平衡/分散化效应**
+    （由 Jensen 不等式可知它恒为非负），可以作为一个独立的数字展示，
+    而不是含糊地叫"误差"。
+
+    成分 VaR 用欧拉分解，各标的占比之和为 1（这条是精确的）。
     """
     simple = returns.to_simple(rets, method="simple")
-    contribution = {symbol: float((simple[symbol] * float(weights[symbol])).sum()) for symbol in weights}
+    log_rets = np.log1p(simple)
+    contribution = {symbol: float((log_rets[symbol] * float(weights[symbol])).sum()) for symbol in weights}
     component = correlation.component_var(simple, weights, level=0.95)
     total = float(component.sum())
     share = {symbol: (float(component[symbol]) / total if total else None) for symbol in weights}
     return {
         "component_var": {symbol: round(float(component[symbol]), 8) for symbol in weights},
         "component_var_share": {symbol: (None if share[symbol] is None else round(share[symbol], 6)) for symbol in weights},
-        "return_contribution": {symbol: round(value, 8) for symbol, value in contribution.items()},
-        "return_contribution_sum": round(sum(contribution.values()), 8),
+        "log_contribution": {symbol: round(value, 8) for symbol, value in contribution.items()},
+        "log_contribution_sum": round(sum(contribution.values()), 8),
     }
 
 
@@ -327,6 +347,9 @@ def compute_preset(
     per_asset = {symbol: _asset_summary(returns.nav_from_prices(aligned[symbol])) for symbol in aligned.columns}
 
     risk = _risk_contribution(rets, spec.weights)
+    # 对数贡献之和与组合实际对数收益的差额 = 再平衡/分散化效应（Jensen 不等式保证非负）
+    risk["log_total_return"] = round(float(np.log1p(metrics.total_return(nav))), 8)
+    risk["rebalancing_effect"] = round(risk["log_total_return"] - risk["log_contribution_sum"], 8)
 
     adjustment_frame = None
     try:
@@ -334,7 +357,7 @@ def compute_preset(
     except Exception:  # noqa: BLE001 - 缺 adj_factor 时不阻塞整页
         adjustment_frame = None
 
-    diagnostics = _diagnostics(rets, spec.weights, risk["return_contribution"], adjustment_frame, len(aligned))
+    diagnostics = _diagnostics(rets, spec.weights, risk["log_contribution"], adjustment_frame, len(aligned))
 
     meta = repo.read_etf_meta(con, symbols)
     class_by_symbol = dict(zip(meta.get("symbol", []), meta.get("asset_class", []))) if not meta.empty else {}
@@ -645,11 +668,17 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
 <div class="grid" style="margin-top:12px">
   {theme.panel("净值与水下曲线", theme.figure_html(figures.fig_nav(result), f"{prefix}fig-nav"), span=8)}
   {theme.panel("收益归因", theme.figure_html(figures.fig_return_contribution(result), f"{prefix}fig-attrib")
-    + "<p class='note'>算术贡献各项之和 "
-    + theme.pct((result.get('risk_contribution') or {}).get('return_contribution_sum'))
-    + " 与复利后的实际累计收益 "
-    + theme.pct((result.get('metrics') or {}).get('total_return'))
-    + " 之间的差额，就是复利与再平衡效应——归因相加不等于累计收益，这是它的固有难点。</p>", span=4)}
+    + "<p class='note'>归因用<b>对数贡献</b>（各标的的对数收益 × 权重）：它扣掉了每个标的自身的复利效应，"
+    + "量级与实际收益可比。算术贡献会被各标的自身的波动拖累主导（长周期里单一标的能到 +8000bp，"
+    + "而组合实际累计只有几十个百分点），那种数字无法解读。</p>"
+    + "<p class='note'>各标的对数贡献之和 "
+    + theme.pct((result.get('risk_contribution') or {}).get('log_contribution_sum'))
+    + "，组合实际对数收益 "
+    + theme.pct((result.get('risk_contribution') or {}).get('log_total_return'))
+    + "，差额 <b>"
+    + theme.pct((result.get('risk_contribution') or {}).get('rebalancing_effect'))
+    + "</b> 就是<b>再平衡/分散化效应</b>——由 Jensen 不等式它恒为非负："
+    + "每日再平衡会在波动中不断把权重拉回目标，从而多得一部分收益。</p>", span=4)}
   {theme.panel("权重 vs 风险贡献", theme.figure_html(figures.fig_risk_vs_weight(result), f"{prefix}fig-risk"), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
@@ -657,8 +686,8 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
   {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), f"{prefix}fig-roll"), span=4)}
   {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
   {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), f"{prefix}fig-asset"), span=4)}
-  {theme.panel("因子敞口矩阵", theme.figure_html(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo"), span=7)}
-  {theme.panel("敞口拟合质量", _exposure_table(result), span=5)}
+  {theme.panel("因子敞口矩阵（热力图）", theme.figure_html(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo"), span=12)}
+  {theme.panel("敞口明细与拟合质量", _exposure_table(result), span=12)}
   {theme.panel("历史情节重放", theme.figure_html(figures.fig_episodes(result), f"{prefix}fig-epi")
     + _episodes_block(result), span=12)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}

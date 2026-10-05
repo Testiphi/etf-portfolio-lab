@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from etf_lab.data import repo
 from etf_lab.presets import PortfolioSpec
@@ -136,6 +137,11 @@ def test_compute_preset_runs_end_to_end_on_synthetic_data(tmp_path: Path) -> Non
     assert result["n_obs"] > 500
     assert result["metrics"]["annualized_return"] is not None
     assert set(result["risk_contribution"]["component_var_share"]) == {"AAA", "BBB"}
+    # 对数贡献与组合实际对数收益之差即再平衡效应，Jensen 不等式保证非负
+    risk = result["risk_contribution"]
+    assert set(risk["log_contribution"]) == {"AAA", "BBB"}
+    assert risk["rebalancing_effect"] >= 0
+    assert risk["log_total_return"] == pytest.approx(risk["log_contribution_sum"] + risk["rebalancing_effect"], abs=1e-6)
     # 没有净值数据时折溢价应为空字典，而不是抛错或填 0
     assert result["premium_discount"] == {}
     # 组合结构识别正确 → 债券类模块应当被触发
