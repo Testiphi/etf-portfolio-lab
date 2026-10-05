@@ -15,22 +15,39 @@
   将来要扩容必须加 sticky session 与 Redis，这一点写在页面说明里；
 * **不做大数据回传**：只推送"摘要 + 图表数据"，不整表塞进表格
   （NiceGUI 的 WebSocket 单条消息上限 1,000,000 字节）。
+
+两个实测踩出来的坑（都在这里留档）
+---------------------------------
+1. **进程池作业必须只读打开数据库**。DuckDB 里只要有任一进程以读写打开就取独占锁，
+   而数据库实例在进程内**常驻**——worker 算完任务、``con.close()`` 之后实例仍持锁，
+   于是第二个 worker 直接失败（``IOException: 另一个程序正在使用此文件``），
+   表现是"有的组合能打开、有的报 500"，且取决于访问顺序。
+2. ``ui.page`` 的 **``response_timeout`` 默认只有 3 秒**，而一个组合要跑
+   利率、蒙特卡洛与 Delta-Gamma 复制模拟，冷启动时必然超时
+   （报 ``Response ... not ready after 3.0 seconds``，随后是
+   ``Client has been deleted but is still being used``）。
+   本项目把该页面的 ``response_timeout`` 放宽到 60 秒，并在启动时**后台预热**缓存，
+   让第一个访客也不必等进程池冷启动。
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
-from nicegui import ui
+from nicegui import app, ui
 
 from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.data import repo
 from etf_lab.presets import PRESETS, PRESETS_BY_KEY
-from etf_lab.reports import figures, insights as insights_mod, theme
+from etf_lab.reports import figures, insights as insights_mod, static_site
 from etf_lab.services.jobs import compute_custom_job, compute_preset_job
 from etf_lab.services.pool import run_heavy
+
+PRESET_PAGE_TIMEOUT = 60.0
+"""组合页的构建时限（秒）。默认 3 秒对这里的计算量完全不现实。"""
 
 CSS = """
 body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -39,11 +56,26 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
   color:#e8c07d; padding:5px 8px; border-radius:6px; font-size:12px; }
 .warn { color:#ff7a59; }
 .muted { color:#8b95a7; font-size:13px; }
+/* 注入的表格块（与静态站共用同一套 HTML）需要这些基础样式，
+   否则表格会挤在一起、数字对不齐，读起来比缺失更糟。 */
+html table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
+html th, html td { border: 1px solid #252c3a; padding: 4px 8px; text-align: right; }
+html th:first-child, html td:first-child { text-align: left; }
+html th { background: #151a22; color: #8b95a7; font-weight: 600; }
+html .note { color: #8b95a7; font-size: 12px; margin-top: 6px; line-height: 1.6; }
+html .ok { color: #3ddc97; }
+html .warn-text { color: #ff7a59; }
+html .badge { border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+html .badge.pending { background: #3a2a1a; color: #e8c07d; }
 """
 
 # 进程内缓存：key = f"{spec_key}|{data_version}"。小站点上这就够用；
 # 多实例部署时必须换成 Redis（NiceGUI 的 app.storage 只是本地 JSON 文件）。
 _RESULT_CACHE: dict[str, dict[str, Any]] = {}
+
+# 在途任务表：同一档位可能被多个访客同时打开（启动预热也可能正在跑），
+# 重复提交同一个重计算既浪费 CPU、也会让进程池排队。
+_INFLIGHT: dict[str, asyncio.Task] = {}
 
 
 def _db_path(db_path: str | Path | None) -> str | None:
@@ -68,17 +100,38 @@ def _counts(db_path: str | Path | None) -> dict[str, int]:
         con.close()
 
 
+async def _run_preset_job(key: str, db_path: str | Path | None, cache_key: str) -> tuple[dict[str, Any], str, str | None]:
+    """真正执行一次重计算，并把结果写进进程内缓存。"""
+    outcome = await run_heavy(compute_preset_job, key, _db_path(db_path))
+    if isinstance(outcome.value, dict):
+        _RESULT_CACHE[cache_key] = outcome.value
+    return outcome.value, outcome.via, outcome.note
+
+
 async def _compute_preset_cached(key: str, db_path: str | Path | None) -> tuple[dict[str, Any], str, str | None]:
-    """带缓存地计算预设组合，返回 ``(结果, 执行途径, 提示)``。"""
+    """带缓存地计算预设组合，返回 ``(结果, 执行途径, 提示)``。
+
+    同一档位的并发请求会**合并到同一个在途任务**——否则三个访客同时打开同一档位，
+    就会让进程池排三次完全相同的重计算。
+    """
     version = _data_version(db_path)
     cache_key = f"{key}|{version}"
     if cache_key in _RESULT_CACHE:
         return _RESULT_CACHE[cache_key], "cache", None
 
-    outcome = await run_heavy(compute_preset_job, key, _db_path(db_path))
-    if isinstance(outcome.value, dict):
-        _RESULT_CACHE[cache_key] = outcome.value
-    return outcome.value, outcome.via, outcome.note
+    task = _INFLIGHT.get(cache_key)
+    joined = task is not None
+    if task is None:
+        task = asyncio.ensure_future(_run_preset_job(key, db_path, cache_key))
+        _INFLIGHT[cache_key] = task
+    try:
+        # shield：即使这一个访客断开，也不要取消已经在跑的重计算——
+        # 否则另一个正在等待的访客会连带失败。
+        result, via, note = await asyncio.shield(task)
+    finally:
+        if _INFLIGHT.get(cache_key) is task:
+            _INFLIGHT.pop(cache_key, None)
+    return result, ("合并到同一计算" if joined else via), note
 
 
 def _metric_tiles(result: dict[str, Any]) -> None:
@@ -122,41 +175,49 @@ def _num(value: Any, digits: int = 2) -> str:
         return "—"
 
 
-def _dca_table(result: dict[str, Any]) -> None:
-    rows = []
-    for mode, payload in result["dca"].items():
-        label = "固定金额" if mode == "fixed" else "价值平均"
-        if "error" in payload:
-            rows.append({"mode": label, "note": payload["error"]})
-            continue
-        rows.append(
-            {
-                "mode": label,
-                "periods": payload["n_contributions"],
-                "invested": f"{payload['invested_total']:,.0f}",
-                "final": f"{payload['final_value']:,.0f}",
-                "cumulative": _pct(payload["cumulative_return_on_invested"]),
-                "naive": _pct(payload["naive_annualized_return"]),
-                "xirr": _pct(payload["xirr"]),
-            }
-        )
-    ui.table(
-        columns=[
-            {"name": "mode", "label": "定投方式", "field": "mode", "align": "left"},
-            {"name": "periods", "label": "期数", "field": "periods"},
-            {"name": "invested", "label": "累计投入", "field": "invested"},
-            {"name": "final", "label": "期末市值", "field": "final"},
-            {"name": "cumulative", "label": "累计收益（总÷总投入）", "field": "cumulative"},
-            {"name": "naive", "label": "错误地当年化", "field": "naive"},
-            {"name": "xirr", "label": "XIRR（正确）", "field": "xirr"},
-        ],
-        rows=rows,
-        row_key="mode",
-    ).classes("w-full")
-    ui.label(
-        f"参照：这段时间组合本身的时间加权年化是 {_pct(result.get('time_weighted_annualized'))}，"
-        "它衡量标的涨了多少，与你的钱赚了多少是两个不同的问题。"
-    ).classes("muted")
+ANALYSIS_TABS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # (标签, 图表函数名, 表格块键)。图表与表格都来自 reports/，两条路线共用同一套表述。
+    ("净值与回撤", ("fig_nav",), ("drawdown",)),
+    ("收益与风险", ("fig_return_contribution", "fig_risk_vs_weight", "fig_rolling_sharpe"), ()),
+    ("定投", ("fig_dca",), ("dca",)),
+    ("各标的", ("fig_per_asset",), ("per_asset",)),
+    ("因子敞口", ("fig_exposure_heatmap",), ("exposure",)),
+    ("利率与久期", ("fig_yield_curve", "fig_yield_history", "fig_rate_scenarios"), ("rates", "duration")),
+    ("波动率与期权", ("fig_vol_term_structure", "fig_protection_curve"), ("derivatives",)),
+    ("蒙特卡洛", ("fig_mc_fan", "fig_mc_histogram", "fig_mc_convergence"), ("monte_carlo",)),
+    ("Delta-Gamma 复制", ("fig_hedge_tradeoff",), ("hedge",)),
+    ("历史情节重放", ("fig_episodes",), ()),
+)
+"""应用侧的模块清单。
+
+**必须与静态站的仪表盘覆盖同一批分析。** 之前应用只渲染了净值/定投/各标的，
+于是同一个组合在静态站上有利率、久期、蒙特卡洛、Delta-Gamma 复制，
+在应用里却看不到——两条路线共用计算却不共用表述，是最容易产生"互相矛盾"的地方。
+"""
+
+
+def _render_analysis_tabs(result: dict[str, Any]) -> None:
+    """按模块渲染标签页；图表来自 figures，表格来自 static_site.html_blocks。"""
+    blocks = static_site.html_blocks(result)
+    with ui.tabs().classes("w-full") as tabs:
+        labels = [ui.tab(label) for label, _, _ in ANALYSIS_TABS]
+    with ui.tab_panels(tabs, value=labels[0]).classes("w-full"):
+        for (label, figure_names, block_keys), tab in zip(ANALYSIS_TABS, labels):
+            with ui.tab_panel(tab):
+                rendered = False
+                for name in figure_names:
+                    figure = getattr(figures, name)(result)
+                    # 没有数据时图表是空的：画一堆空坐标轴比不画更糟
+                    if getattr(figure, "data", None):
+                        ui.plotly(figure).classes("w-full")
+                        rendered = True
+                for key in block_keys:
+                    html = blocks.get(key) or ""
+                    if html.strip():
+                        ui.html(html)
+                        rendered = True
+                if not rendered:
+                    ui.label("该模块需要更多数据或特定持仓结构，当前不可用。").classes("muted")
 
 
 def _render_result(result: dict[str, Any]) -> None:
@@ -167,57 +228,7 @@ def _render_result(result: dict[str, Any]) -> None:
         with ui.card().classes("bg-amber-50"):
             ui.label(result["caveat"]).classes("text-sm")
     _metric_tiles(result)
-    with ui.tabs().classes("w-full") as tabs:
-        tab_nav = ui.tab("净值与回撤")
-        tab_dca = ui.tab("定投收益率的三种口径")
-        tab_assets = ui.tab("各标的表现")
-    with ui.tab_panels(tabs, value=tab_nav).classes("w-full"):
-        with ui.tab_panel(tab_nav):
-            ui.plotly(figures.fig_nav(result)).classes("w-full")
-            ui.label("只报一个最大回撤会掩盖路径差异：跌得快恢复快与阴跌两年是完全不同的体验。").classes("muted")
-            ui.table(
-                columns=[
-                    {"name": "depth", "label": "深度", "field": "depth", "align": "left"},
-                    {"name": "peak", "label": "高点", "field": "peak"},
-                    {"name": "trough", "label": "低点", "field": "trough"},
-                    {"name": "recovery", "label": "修复日", "field": "recovery"},
-                    {"name": "days", "label": "修复用时(天)", "field": "days"},
-                ],
-                rows=[
-                    {
-                        "depth": _pct(d["depth"]),
-                        "peak": d["peak"],
-                        "trough": d["trough"],
-                        "recovery": d["recovery"] or "尚未修复",
-                        "days": d["recovery_days"],
-                    }
-                    for d in result["top_drawdowns"]
-                ],
-                row_key="peak",
-            ).classes("w-full")
-        with ui.tab_panel(tab_dca):
-            ui.plotly(figures.fig_dca(result)).classes("w-full")
-            _dca_table(result)
-        with ui.tab_panel(tab_assets):
-            ui.plotly(figures.fig_per_asset(result)).classes("w-full")
-            ui.table(
-                columns=[
-                    {"name": "symbol", "label": "标的", "field": "symbol", "align": "left"},
-                    {"name": "ret", "label": "年化收益", "field": "ret"},
-                    {"name": "vol", "label": "年化波动", "field": "vol"},
-                    {"name": "mdd", "label": "最大回撤", "field": "mdd"},
-                ],
-                rows=[
-                    {
-                        "symbol": symbol,
-                        "ret": _pct(v["annualized_return"]),
-                        "vol": _pct(v["annualized_volatility"]),
-                        "mdd": _pct(v["max_drawdown"]),
-                    }
-                    for symbol, v in result["per_asset"].items()
-                ],
-                row_key="symbol",
-            ).classes("w-full")
+    _render_analysis_tabs(result)
 
     ui.label("洞察（由你的数据触发）").classes("text-xl font-semibold mt-6")
     _insights_block(result)
@@ -319,7 +330,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
             "将来扩容需要 sticky session 与 Redis，而不是简单加 worker。"
         ).classes("muted")
 
-    @ui.page("/preset/{key}")
+    @ui.page("/preset/{key}", response_timeout=PRESET_PAGE_TIMEOUT)
     async def preset_page(key: str) -> None:
         ui.dark_mode().enable()
         ui.link("← 返回首页", "/")
@@ -415,4 +426,18 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
         ui.label("概念与陷阱").classes("text-2xl font-bold")
         _concept_cards(list(teaching.CARDS))
 
+    async def _warm_cache() -> None:
+        """启动时后台预热示例组合的缓存。
+
+        冷启动的第一次计算要付进程池启动与子进程导入 numpy/scipy 的代价
+        （实测让页面构建超过 3 秒，正好撞上默认的 response_timeout）。
+        预热后第一个访客也能立刻看到结果。预热失败只是少了个优化，不该拦住启动。
+        """
+        for spec in PRESETS:
+            try:
+                await _compute_preset_cached(spec.key, db_path)
+            except Exception:  # noqa: BLE001
+                continue
+
+    app.on_startup(_warm_cache)
     ui.run(host=host, port=port, title="ETF 组合数值实验室", reload=False, show=False, favicon="📊")

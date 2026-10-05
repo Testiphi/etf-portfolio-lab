@@ -19,25 +19,27 @@ from etf_lab.presets import PortfolioSpec
 from etf_lab.reports import static_site, theme
 
 FIGURE_SUFFIXES = (
+    # 容器 id 由图表函数名机械推导（theme.figure_id），所以这里就是函数名换连字符——
+    # 不再需要人工维护一张 "fig-attrib ↔ fig_return_contribution" 的对照表。
     "fig-nav",
-    "fig-attrib",
-    "fig-risk",
+    "fig-return_contribution",
+    "fig-risk_vs_weight",
     "fig-dca",
-    "fig-roll",
-    "fig-asset",
-    "fig-expo",
-    "fig-ycurve",
-    "fig-yhist",
-    "fig-vol",
-    "fig-prot",
-    "fig-hedge",
-    "fig-mcfan",
-    "fig-mchist",
-    "fig-mcconv",
-    "fig-epi",
+    "fig-rolling_sharpe",
+    "fig-per_asset",
+    "fig-exposure_heatmap",
+    "fig-yield_curve",
+    "fig-yield_history",
+    "fig-vol_term_structure",
+    "fig-protection_curve",
+    "fig-hedge_tradeoff",
+    "fig-mc_fan",
+    "fig-mc_histogram",
+    "fig-mc_convergence",
+    "fig-episodes",
 )
 """无论是否持有债券都应出现的图表。"""
-BOND_ONLY_SUFFIXES = ("fig-scen",)
+BOND_ONLY_SUFFIXES = ("fig-rate_scenarios",)
 """只有组合含债券标的（久期可估）时才出现的图表。"""
 EXPECTED_WITH_BOND = FIGURE_SUFFIXES + BOND_ONLY_SUFFIXES
 
@@ -259,13 +261,13 @@ def test_duration_panel_is_conditional_on_bond_holdings(tmp_path: Path) -> None:
     html_without = static_site.render_dashboard(without, prefix="without-", figs=figs_without)
 
     assert "久期与利率冲击" in html_with
-    assert "with-fig-scen" in figs_with
+    assert "with-fig-rate_scenarios" in figs_with
     assert "久期与利率冲击" not in html_without
-    assert "with-fig-scen" not in figs_without
+    assert "with-fig-rate_scenarios" not in figs_without
 
     # 利率环境面板与曲线图与持仓无关，只要曲线数据在就应当出现
     assert "利率环境与无风险利率" in html_without
-    assert "without-fig-ycurve" in figs_without
+    assert "without-fig-yield_curve" in figs_without
 
 
 def test_curves_are_downsampled_but_keep_extremes() -> None:
@@ -314,6 +316,62 @@ def test_narrow_screen_collapses_all_panels() -> None:
     """窄屏折叠要用 .grid > * 通配，而不是逐个列出 span 类（漏一个就不折叠）。"""
     assert ".grid > *" in theme.STYLE
     assert "@media (max-width: 1000px)" in theme.STYLE
+
+
+def test_app_renders_every_analysis_the_static_site_shows(tmp_path: Path) -> None:
+    """C 路径（NiceGUI）必须覆盖 A 路径（静态站）仪表盘的全部分析模块。
+
+    两条路线共用同一套**计算**，却各自**渲染**。覆盖度一旦分叉，同一个组合在
+    静态站上有利率、久期、蒙特卡洛、Delta-Gamma 复制，在应用里却看不到——
+    这比数字不一致更隐蔽，因为两边都不会报错。
+
+    真源取"实际渲染出来的仪表盘里的图表清单"，而不是某个手写列表：
+    手写列表会在新增面板时忘记同步，那正是这个 bug 的成因。
+    """
+    pytest.importorskip("nicegui", reason="路线 C 依赖 NiceGUI（可选依赖）")
+
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    result = static_site.compute_preset(con, _spec("one"))
+    con.close()
+
+    figs: dict = {}
+    static_site.render_dashboard(result, prefix="one-", figs=figs)
+    rendered = {re.sub(r"^one-", "", figure_id).replace("-", "_") for figure_id in figs}
+
+    from etf_lab.app.main import ANALYSIS_TABS
+    from etf_lab.reports import figures as figures_mod
+
+    covered = {name for _, names, _ in ANALYSIS_TABS for name in names}
+    assert rendered, "静态站仪表盘应当至少有一张图"
+    assert not (rendered - covered), f"静态站有、应用没渲染的图表：{sorted(rendered - covered)}"
+    for name in covered:
+        assert hasattr(figures_mod, name), f"应用引用了不存在的图表函数：{name}"
+
+
+def test_shared_html_blocks_cover_all_analyses(tmp_path: Path) -> None:
+    """应用复用的表格块必须齐全且非空（数据缺失时也要给出说明而不是空白）。"""
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    result = static_site.compute_preset(con, _spec("one"))
+    con.close()
+
+    blocks = static_site.html_blocks(result)
+    assert set(blocks) == {
+        "drawdown",
+        "dca",
+        "per_asset",
+        "exposure",
+        "rates",
+        "duration",
+        "derivatives",
+        "hedge",
+        "monte_carlo",
+    }
+    empty = [key for key, html in blocks.items() if not html.strip()]
+    assert not empty, f"这些表格块是空的（应当给出说明文案）：{empty}"
 
 
 def test_standalone_page_ids_are_unique(tmp_path: Path) -> None:

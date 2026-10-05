@@ -1122,14 +1122,14 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     if rates_data.get("available"):
         rate_panels = (
             theme.panel("利率环境与无风险利率", _rates_tables(result), span=4)
-            + theme.panel("国债收益率曲线", theme.figure_div(figures.fig_yield_curve(result), f"{prefix}fig-ycurve", figs), span=4)
-            + theme.panel("国债收益率历史", theme.figure_div(figures.fig_yield_history(result), f"{prefix}fig-yhist", figs), span=4)
+            + theme.panel("国债收益率曲线", theme.figure_div_for(figures.fig_yield_curve, result, prefix, figs), span=4)
+            + theme.panel("国债收益率历史", theme.figure_div_for(figures.fig_yield_history, result, prefix, figs), span=4)
         )
     duration_panel = ""
     if (result.get("composition") or {}).get("has_bond") and rates_data.get("scenarios"):
         duration_panel = theme.panel(
             "久期与利率冲击",
-            theme.figure_div(figures.fig_rate_scenarios(result), f"{prefix}fig-scen", figs) + _duration_tables(result),
+            theme.figure_div_for(figures.fig_rate_scenarios, result, prefix, figs) + _duration_tables(result),
             span=12,
         )
 
@@ -1145,8 +1145,8 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
 {_metrics_keyboard(result)}
 
 <div class="grid" style="margin-top:12px">
-  {theme.panel("净值与水下曲线", theme.figure_div(figures.fig_nav(result), f"{prefix}fig-nav", figs), span=8)}
-  {theme.panel("收益归因", theme.figure_div(figures.fig_return_contribution(result), f"{prefix}fig-attrib", figs)
+  {theme.panel("净值与水下曲线", theme.figure_div_for(figures.fig_nav, result, prefix, figs), span=8)}
+  {theme.panel("收益归因", theme.figure_div_for(figures.fig_return_contribution, result, prefix, figs)
     + "<p class='note'>归因用<b>对数贡献</b>（各标的的对数收益 × 权重）：它扣掉了每个标的自身的复利效应，"
     + "量级与实际收益可比。算术贡献会被各标的自身的波动拖累主导（长周期里单一标的能到 +8000bp，"
     + "而组合实际累计只有几十个百分点），那种数字无法解读。</p>"
@@ -1158,32 +1158,32 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     + theme.pct((result.get('risk_contribution') or {}).get('rebalancing_effect'))
     + "</b> 就是<b>再平衡/分散化效应</b>——由 Jensen 不等式它恒为非负："
     + "每日再平衡会在波动中不断把权重拉回目标，从而多得一部分收益。</p>", span=4)}
-  {theme.panel("权重 vs 风险贡献", theme.figure_div(figures.fig_risk_vs_weight(result), f"{prefix}fig-risk", figs), span=6)}
+  {theme.panel("权重 vs 风险贡献", theme.figure_div_for(figures.fig_risk_vs_weight, result, prefix, figs), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
-  {theme.panel("定投：市值 vs 累计投入", theme.figure_div(figures.fig_dca(result), f"{prefix}fig-dca", figs), span=6)}
-  {theme.panel("滚动一年夏普", theme.figure_div(figures.fig_rolling_sharpe(result), f"{prefix}fig-roll", figs), span=4)}
+  {theme.panel("定投：市值 vs 累计投入", theme.figure_div_for(figures.fig_dca, result, prefix, figs), span=6)}
+  {theme.panel("滚动一年夏普", theme.figure_div_for(figures.fig_rolling_sharpe, result, prefix, figs), span=4)}
   {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
-  {theme.panel("各标的年化 vs 最大回撤", theme.figure_div(figures.fig_per_asset(result), f"{prefix}fig-asset", figs), span=4)}
-  {theme.panel("因子敞口矩阵（热力图）", theme.figure_div(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo", figs), span=12)}
+  {theme.panel("各标的年化 vs 最大回撤", theme.figure_div_for(figures.fig_per_asset, result, prefix, figs), span=4)}
+  {theme.panel("因子敞口矩阵（热力图）", theme.figure_div_for(figures.fig_exposure_heatmap, result, prefix, figs), span=12)}
   {theme.panel("敞口明细与拟合质量", _exposure_table(result), span=12)}
   {rate_panels}
   {duration_panel}
-  {theme.panel("波动率期限结构", theme.figure_div(figures.fig_vol_term_structure(result), f"{prefix}fig-vol", figs)
+  {theme.panel("波动率期限结构", theme.figure_div_for(figures.fig_vol_term_structure, result, prefix, figs)
     + "<p class='note'>不同回看窗口下的<b>历史</b>波动率。它不是隐含波动率——"
     + "隐含波动率是市场对<b>未来</b>波动的定价，恐慌时会显著高于历史波动率，"
     + "这正是「最需要保险时保险最贵」的来源。</p>", span=5)}
-  {theme.panel("保护成本曲线", theme.figure_div(figures.fig_protection_curve(result), f"{prefix}fig-prot", figs), span=7)}
+  {theme.panel("保护成本曲线", theme.figure_div_for(figures.fig_protection_curve, result, prefix, figs), span=7)}
   {theme.panel("保护成本与 Greeks（理论值）", _derivatives_table(result), span=12)}
-  {theme.panel("Delta-Gamma 复制：频率权衡", theme.figure_div(figures.fig_hedge_tradeoff(result), f"{prefix}fig-hedge", figs), span=5)}
+  {theme.panel("Delta-Gamma 复制：频率权衡", theme.figure_div_for(figures.fig_hedge_tradeoff, result, prefix, figs), span=5)}
   {theme.panel("复制实验详情（误差、成本与近似边界）", _hedge_tables(result), span=7)}
-  {theme.panel("蒙特卡洛：终值分布扇形图", theme.figure_div(figures.fig_mc_fan(result), f"{prefix}fig-mcfan", figs), span=7)}
-  {theme.panel("终值分布直方图", theme.figure_div(figures.fig_mc_histogram(result), f"{prefix}fig-mchist", figs), span=5)}
-  {theme.panel("收敛诊断：路径数够不够", theme.figure_div(figures.fig_mc_convergence(result), f"{prefix}fig-mcconv", figs)
+  {theme.panel("蒙特卡洛：终值分布扇形图", theme.figure_div_for(figures.fig_mc_fan, result, prefix, figs), span=7)}
+  {theme.panel("终值分布直方图", theme.figure_div_for(figures.fig_mc_histogram, result, prefix, figs), span=5)}
+  {theme.panel("收敛诊断：路径数够不够", theme.figure_div_for(figures.fig_mc_convergence, result, prefix, figs)
     + "<p class='note'>标准误应大致按 1/√N 下降（双对数图上是一条斜率 −0.5 的直线）。"
     + "偏离这条线说明结果对路径数仍敏感，那个数字就还在抖。</p>", span=5)}
   {theme.panel("四个模型的结论对比", _monte_carlo_tables(result), span=7)}
-  {theme.panel("历史情节重放", theme.figure_div(figures.fig_episodes(result), f"{prefix}fig-epi", figs)
+  {theme.panel("历史情节重放", theme.figure_div_for(figures.fig_episodes, result, prefix, figs)
     + _episodes_block(result), span=12)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
   {theme.panel("可解锁模块", _unlocks_block(result), span=12)}
@@ -1281,6 +1281,29 @@ def render_index(
 <script>labInitTabs();</script>
 """
     return _page("ETF 组合数值实验室 · 组合工作台", body, root=root, data_version=data_version)
+
+
+def html_blocks(result: Mapping[str, Any]) -> dict[str, str]:
+    """把仪表盘里的表格块以 HTML 形式暴露出来，供路线 C（NiceGUI）复用。
+
+    两条路线共用同一套计算，也应该共用同一套**表述**——否则同一个组合会在
+    静态站与应用里出现两套口径不同的表格，那正是"教学工具互相矛盾"。
+    因此应用侧不重写表格，而是直接渲染这里的 HTML。
+
+    每个块在数据缺失时都会返回一句说明（而不是空白或报错），
+    所以调用方可以无条件渲染。
+    """
+    return {
+        "drawdown": _drawdown_table(result),
+        "dca": _dca_table(result),
+        "per_asset": _per_asset_table(result),
+        "exposure": _exposure_table(result),
+        "rates": _rates_tables(result),
+        "duration": _duration_tables(result),
+        "derivatives": _derivatives_table(result),
+        "hedge": _hedge_tables(result),
+        "monte_carlo": _monte_carlo_tables(result),
+    }
 
 
 def render_concepts(*, root: str = "") -> str:

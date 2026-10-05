@@ -304,6 +304,34 @@ def figure_div(fig: go.Figure, div_id: str, figs: dict[str, Any] | None = None) 
     return f'<div id="{div_id}" style="width:100%"></div>'
 
 
+def figure_id(prefix: str, figure: Any) -> str:
+    """由**图表函数名**机械地推导容器 id，例如 ``figures.fig_nav`` → ``fig-nav``。
+
+    为什么要机械推导而不是手写 id
+    ----------------------------
+    手写 id 会立刻带来一张需要人工维护的"id ↔ 图表函数"对照表
+    （``fig-attrib`` 对应 ``fig_return_contribution``、``fig-expo`` 对应
+    ``fig_exposure_heatmap``……）。这类对照表一定会腐烂，而且它是**静默**腐烂：
+    新增图时忘了同步，页面照常渲染，只是"路线 A 与路线 C 是否覆盖同一批分析"
+    这个不变量再也无法机械核对。
+    """
+    name = figure if isinstance(figure, str) else getattr(figure, "__name__", str(figure))
+    # 只把**第一个**下划线换成连字符：fig_nav → fig-nav、fig_mc_fan → fig-mc_fan。
+    # 全换会让 fig_return_contribution 变成 fig-return-contribution，可读性反而下降。
+    head, _, tail = name.partition("_")
+    return f"{prefix}{head}-{tail}" if tail else f"{prefix}{name}"
+
+
+def figure_div_for(
+    func: Any,
+    result: Mapping[str, Any],
+    prefix: str = "",
+    figs: dict[str, Any] | None = None,
+) -> str:
+    """调用图表函数并渲染容器，容器 id 由函数名推导（见 :func:`figure_id`）。"""
+    return figure_div(func(result), figure_id(prefix, func), figs)
+
+
 def figure_data_js(figs: Mapping[str, Any]) -> str:
     """把一组图合并成一个可被 ``<script src>`` 装载的数据文件。"""
     payload = json.dumps(dict(figs), ensure_ascii=False, separators=(",", ":"))
