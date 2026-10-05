@@ -27,24 +27,35 @@
 ## 快速开始
 
 ```bash
-# 1) 环境（Windows 示例；国内建议用镜像）
+# 1) 环境：用 uv 建虚拟环境并装依赖（国内直连 PyPI 会超时，用镜像）
 uv venv .venv --python 3.12
-uv pip install -e ".[dev,data,app]"
-#   若直连 PyPI 超时，使用镜像：
-#   uv pip install -e ".[dev,data,app]" --index-url https://mirrors.aliyun.com/pypi/simple/
+uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels duckdb plotly pyyaml requests pytest nicegui `
+  --index-url https://mirrors.aliyun.com/pypi/simple/
 
-# 2) 跑数值校验测试（这一步必须全绿）
-.venv\Scripts\python.exe -m pytest
+#    未做 editable 安装也能直接跑（下面统一依赖 PYTHONPATH）：
+#    PowerShell:  $env:PYTHONPATH='src'
 
-# 3) 拉取数据到本地 DuckDB（生成 data/lab.duckdb，已 gitignore）
+# 2) 跑数值校验测试（这一步必须全绿，共 54 项）
+.venv\Scripts\python.exe -m pytest -q
+
+# 3) 采集数据到本地 DuckDB（生成 data/lab.duckdb，已 gitignore）
+#    腾讯接口有限流，脚本内置 1 秒/次全局限速，一次完整采集需要几分钟
 .venv\Scripts\python.exe -m etf_lab.cli fetch --preset core
 
-# 4) 生成静态站（A 路线）→ docs/
+# 4) 生成静态站（A 路线）→ docs/，直接用浏览器打开 docs/index.html
 .venv\Scripts\python.exe -m etf_lab.cli build-site
 
 # 5) 启动实算应用（C 路线）→ http://127.0.0.1:8080
 .venv\Scripts\python.exe -m etf_lab.cli app
+
+# 数据源可用性探测 / 入库数据交叉校验
+.venv\Scripts\python.exe -m etf_lab.cli probe
+.venv\Scripts\python.exe scripts\verify_stored_data.py
 ```
+
+> **akshare 不是必需依赖**。主数据路径走 `etl/tencent.py` 的纯 HTTP 实现——akshare 依赖
+> `py_mini_racer`（内含 V8 二进制），杀毒软件会误报甚至直接杀进程，本项目就被卡巴斯基
+> 中断过一次。akshare 保留为可选的备用源（`pip install -e ".[data]"`）。
 
 ---
 
@@ -66,16 +77,19 @@ src/etf_lab/
 │   ├── returns.py     # 复权收益、净值曲线、费率
 │   ├── metrics.py     # 年化/波动/回撤/Sharpe/VaR/CVaR
 │   ├── dca.py         # 定投与 XIRR
-│   ├── correlation.py # 相关性与聚类
+│   ├── correlation.py # 相关性、成分 VaR、加入新板块的边际影响
 │   ├── optimize.py    # 组合优化（规划中）
 │   ├── simulate.py    # 蒙特卡洛（规划中）
 │   ├── derivatives.py # 期权定价与 Greeks（规划中）
 │   ├── exposure.py    # RBSA 收益法敞口（规划中）
 │   └── hedge.py       # 对冲比率与成本（规划中）
-├── data/          # DuckDB schema 与取数
-├── etl/           # AkShare 采集与校验
-├── reports/       # A 路线：静态站生成
+├── data/          # DuckDB schema 与读写层（唯一允许碰数据库的地方）
+├── etl/           # 多源采集：tencent（主）/ sohu（校验）/ eastmoney（备用）
+├── reports/       # A 路线：静态站生成（计算与渲染分离）
 ├── app/           # C 路线：NiceGUI 界面
+├── services/      # 缓存、进程池封装、可 pickle 的作业函数
+├── content/       # 教学卡片文案（怎么算/说明什么/何时会误导）
+├── tests/         # 数值对照测试（54 项，含采集解析与防呆）
 └── cli.py         # 统一命令入口
 ```
 
@@ -85,12 +99,15 @@ src/etf_lab/
 
 | 数据 | 来源 | 口径说明 |
 |---|---|---|
-| ETF 行情 | AkShare（东方财富） | **前复权**；复权方式一旦写入 `data_version` 即不再变更 |
-| 指数行情 | AkShare（中证/国证） | 指数不可直接交易，用于补 ETF 上市时间短的样本不足 |
+| ETF 行情 | 腾讯公开接口（主源） | **前复权**用于一切收益计算；同时保留未复权价与复权因子 |
+| ETF 行情校验 | 搜狐公开接口（未复权） | 逐日交叉比对，中位差异为 0 |
+| 指数行情 | 腾讯公开接口 | 指数不可直接交易，用于补 ETF 上市时间短的样本不足 |
 | 汇率 | 待接入 | 跨境 ETF 的汇率贡献必须单列 |
 | 国债收益率 | 待接入 | 无风险利率取值直接决定 Sharpe，页面必须显示所用值 |
 | 股指期货 | 待接入 | 基差/贴水是对冲成本的核心 |
-| ETF 期权 | 待接入 | 拿不到完整期权链时退化为"历史波动率下的理论定价 + Greeks 演示" |
+| ETF 期权 | 待接入 | 拿不到完整期权链时退化为「历史波动率下的理论定价 + Greeks 演示」 |
+
+数据源实测细节（谁可用、谁被限流、复权口径如何验证）见 [ARCHITECTURE.md](ARCHITECTURE.md) §2。
 
 **指数成分股不做穿透**：免费源缺少可靠的历史时点成分名单，本项目改用
 **收益法风格分析（RBSA，Sharpe 1992）**——用宽基与行业指数的收益做约束回归来估计敞口，
@@ -112,15 +129,18 @@ src/etf_lab/
 
 ## 路线图
 
-- [x] M0-1 仓库骨架、契约冻结、`core/` 最小集（收益/指标/定投）
-- [ ] M0-2 AkShare 采集 → DuckDB，六类数据打通
-- [ ] A-1 静态站生成器 + 示例组合报告上线 GitHub Pages
-- [ ] C-1 NiceGUI 应用 + 缓存/进程池
-- [ ] B-1 Pyodide 可行性验证
-- [ ] M3 组合优化 + 蒙特卡洛
-- [ ] M4 期权 Greeks + 对冲
-- [ ] M5 RBSA 敞口 + 加入板块 + 调仓
-- [ ] M6 压力测试 + 登录保存组合
+- [x] M0-1 仓库骨架、契约冻结、`core/` 最小集（收益/指标/定投/相关性）
+- [x] M0-2 多源采集 → DuckDB：7 只 ETF 23,494 行 + 7 个指数 24,775 行（2012 年至今）
+- [x] A-1 静态站生成器 + 三个示例组合 + 概念页 + 口径页（`docs/`）
+- [x] C-1 NiceGUI 应用 + 进程池 + 缓存骨架（实测 `cpu_bound` 生效）
+- [x] B-1 Pyodide 可行性评估（结论见 [ARCHITECTURE.md](ARCHITECTURE.md) §5）
+- [ ] M3 组合优化 + 蒙特卡洛（含收敛诊断）
+- [ ] M4 期权 Greeks + 隐含波动率曲面 + 对冲
+- [ ] M5 RBSA 敞口 + 加入板块 + 调仓方向
+- [ ] M6 压力测试 + 登录保存组合（当前纯匿名）
+- [ ] 数据补全：国债收益率曲线、股指期货基差、ETF 期权、汇率
+
+**决策依据、数据源实测结论与已修复缺陷的留档见 [ARCHITECTURE.md](ARCHITECTURE.md)。**
 
 ---
 

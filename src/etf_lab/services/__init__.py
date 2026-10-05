@@ -1,5 +1,7 @@
-"""服务层：缓存、任务队列等与界面无关的运行时设施。"""
+"""服务层：缓存、进程池与作业函数。"""
 
 from __future__ import annotations
 
-__all__ = ["cache"]
+from etf_lab.services import cache, jobs, pool
+
+__all__ = ["cache", "jobs", "pool"]
