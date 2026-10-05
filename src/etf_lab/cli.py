@@ -119,7 +119,56 @@ def build_parser() -> argparse.ArgumentParser:
     p_app.add_argument("--db", default=None)
     p_app.set_defaults(func=cmd_app)
 
+    p_user = sub.add_parser("user", help="管理账号（账号只用于保存组合）")
+    user_sub = p_user.add_subparsers(dest="action", required=True)
+    p_user_add = user_sub.add_parser("add", help="新建账号（口令交互输入，避免留在命令历史里）")
+    p_user_add.add_argument("username")
+    p_user_add.add_argument("--password", default=None, help="不推荐：会留在命令历史里")
+    p_user_list = user_sub.add_parser("list", help="列出已有账号")
+    p_user_list.set_defaults(func=cmd_user_list)
+    p_user_add.set_defaults(func=cmd_user_add)
+
     return parser
+
+
+def cmd_user_add(args) -> int:
+    """新建账号。口令默认交互输入——写在命令行参数里会留在 shell 历史中。"""
+    import getpass
+
+    from etf_lab.data import repo
+    from etf_lab.services import auth
+
+    password = getattr(args, "password", None) or getpass.getpass("设置口令：")
+    con = repo.connect_users()
+    try:
+        name = auth.register(con, args.username, password)
+    except auth.AuthError as exc:
+        print(f"失败：{exc}")
+        return 1
+    finally:
+        con.close()
+    print(f"已创建账号 {name}（存在 data/users.duckdb，与行情库分开）")
+    print("它只用于保存组合；所有分析功能匿名即可使用。")
+    return 0
+
+
+def cmd_user_list(args) -> int:
+    from etf_lab.data import repo
+
+    if not repo.DEFAULT_USERS_DB_PATH.exists():
+        print("还没有用户库，也没有任何账号。用 python -m etf_lab.cli user add <用户名> 创建。")
+        return 0
+    con = repo.connect_users(read_only=True)
+    try:
+        rows = con.execute("SELECT username, created_at FROM users ORDER BY username").fetchall()
+    finally:
+        con.close()
+    if not rows:
+        print("还没有任何账号。用 python -m etf_lab.cli user add <用户名> 创建。")
+        return 0
+    for username, created_at in rows:
+        print(f"  {username}  创建于 {str(created_at)[:19]}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

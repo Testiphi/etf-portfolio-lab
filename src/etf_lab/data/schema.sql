@@ -119,17 +119,6 @@ CREATE TABLE IF NOT EXISTS preset_portfolios (
     definition_json  VARCHAR
 );
 
--- 登录仅用于保存组合；匿名用户完全不落盘
-CREATE TABLE IF NOT EXISTS users (
-    username    VARCHAR PRIMARY KEY,
-    pw_hash     VARCHAR,
-    created_at  TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS portfolios (
-    id               VARCHAR PRIMARY KEY,
-    username         VARCHAR,
-    name             VARCHAR,
-    definition_json  VARCHAR,
-    updated_at       TIMESTAMP
-);
+-- 用户与组合**不在这个库里**：行情库必须是只读制品（多个进程只读共享），
+-- 而保存组合需要写。两者放同一个 DuckDB 文件会互相锁死。
+-- 账号与已保存的组合见 data/users_schema.sql（独立的 data/users.duckdb）。

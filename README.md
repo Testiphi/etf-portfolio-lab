@@ -21,6 +21,13 @@
 面向 A 股指数 ETF 的组合诊断与数值实验工具：输入你持有的 ETF、仓位与定投计划，
 得到历史上的年化收益区间、风险敞口、回撤特征、对冲方案成本、可加入的新板块以及调仓方向。
 
+**匿名优先。** 三条路线里的**全部分析功能都不需要登录**；登录只做一件事——
+把你自己配好的组合存下来（`data/users.duckdb`，与行情库分开）。匿名状态下不落盘任何一行。
+账号口令用 PBKDF2-HMAC-SHA256 加盐存储，但这**不是一套加固过的账号系统**：
+没有登录限流与口令找回，公网部署必须走 HTTPS。
+
+---
+
 **设计主张：默认视图只有数字。** 页面是深色密集仪表盘——指标键盘、净值与水下曲线、
 收益归因（对数贡献）、权重 vs 风险贡献、回撤最深五段、定投三种收益率口径、滚动夏普、
 各标的单独持有、RBSA 因子敞口矩阵、利率环境与无风险利率、久期与利率冲击、
@@ -59,7 +66,7 @@ uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels 
 #    未做 editable 安装也能直接跑（下面统一依赖 PYTHONPATH）：
 #    PowerShell:  $env:PYTHONPATH='src'
 
-# 2) 跑数值校验测试（这一步必须全绿，共 203 项）
+# 2) 跑数值校验测试（这一步必须全绿，共 223 项）
 .venv\Scripts\python.exe -m pytest -q
 
 # 3) 采集数据到本地 DuckDB（生成 data/lab.duckdb，已 gitignore）
@@ -67,6 +74,9 @@ uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels 
 .venv\Scripts\python.exe -m etf_lab.cli fetch --preset core
 #    国债收益率曲线（无风险利率与久期的来源），中债主源 + 新浪兜底
 .venv\Scripts\python.exe -m etf_lab.cli fetch --preset macro --start 2015-01-01
+
+#    可选：建一个账号用于保存组合（不建也能用全部功能，匿名不落盘）
+.venv\Scripts\python.exe -m etf_lab.cli user add 你的用户名
 
 # 4) 生成静态站（A 路线）→ docs/，直接用浏览器打开 docs/index.html
 .venv\Scripts\python.exe -m etf_lab.cli build-site
@@ -117,7 +127,7 @@ src/etf_lab/
 ├── app/           # C 路线：NiceGUI 界面
 ├── services/      # 缓存、进程池封装、可 pickle 的作业函数
 ├── content/       # 教学卡片文案（怎么算/说明什么/何时会误导）
-├── tests/         # 数值对照测试（203 项，含采集解析与防呆）
+├── tests/         # 数值对照测试（223 项，含采集解析与防呆）
 └── cli.py         # 统一命令入口
 ```
 
@@ -166,7 +176,9 @@ src/etf_lab/
 - [x] M3 蒙特卡洛：四个模型并排 + 收敛诊断 + 1% 分位
 - [x] M4 期权 Greeks + 保护成本 + 历史波动率期限结构
 - [x] M5 RBSA 敞口矩阵 + 加入板块的边际影响
-- [ ] M6 压力测试 + 登录保存组合（当前纯匿名）
+- [x] M6 登录保存组合（**匿名可用全部功能，登录只用于保存**；账号与组合存在独立的
+      `data/users.duckdb`，与只读的行情库分开——原因见 ARCHITECTURE §10）
+- [ ] M7 压力测试（把历史情节推广到自定义冲击）
 - [ ] M7 组合优化（`core/optimize.py`，尚未实现）
 - [x] M8 Delta-Gamma 复制与再平衡频率（`core/hedge.py`）：误差 ∝ √Δt、成本 ∝ 1/Δt，
       模拟与 Boyle–Emanuel 解析预期的比值 1.06~1.15，最优频率随成本水平移动

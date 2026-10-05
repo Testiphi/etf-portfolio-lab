@@ -17,6 +17,9 @@ import pandas as pd
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 DEFAULT_DB_PATH = Path("data") / "lab.duckdb"
+DEFAULT_USERS_DB_PATH = Path("data") / "users.duckdb"
+"""用户库：账号与已保存的组合。**与行情库分开**，理由见 data/users_schema.sql。"""
+USERS_SCHEMA_PATH = Path(__file__).with_name("users_schema.sql")
 
 
 def connect(db_path: str | Path | None = None, read_only: bool = False) -> duckdb.DuckDBPyConnection:
@@ -27,6 +30,24 @@ def connect(db_path: str | Path | None = None, read_only: bool = False) -> duckd
     con = duckdb.connect(str(path), read_only=read_only)
     if not read_only:
         init_schema(con)
+    return con
+
+
+def connect_users(db_path: str | Path | None = None, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    """打开**用户库**（账号与已保存的组合），它是独立于行情库的第二个文件。
+
+    为什么独立
+    ----------
+    行情库必须能被多个进程**只读**共享（进程池并发计算），而保存组合需要写。
+    DuckDB 的写锁是文件级且进程内常驻的，两者放同一文件必然互相锁死。
+    详见 ``data/users_schema.sql`` 顶部的说明。
+    """
+    path = Path(db_path) if db_path is not None else DEFAULT_USERS_DB_PATH
+    if str(path) != ":memory:":
+        path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(path), read_only=read_only)
+    if not read_only:
+        con.execute(USERS_SCHEMA_PATH.read_text(encoding="utf-8"))
     return con
 
 

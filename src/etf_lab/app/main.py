@@ -33,6 +33,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -43,11 +45,60 @@ from etf_lab.content import teaching
 from etf_lab.data import repo
 from etf_lab.presets import PRESETS, PRESETS_BY_KEY
 from etf_lab.reports import figures, insights as insights_mod, static_site
+from etf_lab.services import auth
 from etf_lab.services.jobs import compute_custom_job, compute_preset_job
 from etf_lab.services.pool import run_heavy
 
 PRESET_PAGE_TIMEOUT = 60.0
 """组合页的构建时限（秒）。默认 3 秒对这里的计算量完全不现实。"""
+
+
+def _users_path(db_path: str | Path | None = None) -> Path:
+    """用户库路径（与行情库分开，见 data/users_schema.sql）。"""
+    if db_path is None:
+        return repo.DEFAULT_USERS_DB_PATH
+    # 允许测试把用户库放在行情库旁边，便于隔离
+    return Path(db_path).with_name("users.duckdb")
+
+
+def _storage_secret() -> str:
+    """NiceGUI 的会话签名密钥：优先取环境变量，否则在 data/ 下落一个随机值。
+
+    必须**跨重启稳定**，否则每次重启都会让所有人的登录态失效
+    （表现为"刚登录完一刷新又变回未登录"，很难查）。
+    """
+    from_env = os.environ.get("ETF_LAB_STORAGE_SECRET")
+    if from_env:
+        return from_env
+    path = Path("data") / ".storage_secret"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = secrets.token_hex(32)
+    path.write_text(value, encoding="utf-8")
+    return value
+
+
+def _current_user() -> str | None:
+    return app.storage.user.get("username")
+
+
+def _user_header() -> None:
+    """页头。
+
+    **必须把"登录只用于保存"写在界面上**——否则访客会以为不登录就看不到东西，
+    而本项目的定位恰恰是匿名可用全部功能。
+    """
+    with ui.row().classes("items-center gap-4"):
+        ui.link("← 返回首页", "/")
+        user = _current_user()
+        if user:
+            ui.label(f"已登录：{user}").classes("muted")
+            ui.link("我的组合", "/portfolios")
+            ui.link("退出", "/logout")
+        else:
+            ui.link("登录 / 注册", "/login")
+    ui.label("所有分析功能都无需登录；登录只用于保存你自己配好的组合。").classes("muted")
 
 CSS = """
 body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -304,6 +355,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
         ui.dark_mode().enable()
         ui.label("ETF 组合数值实验室").classes("text-3xl font-bold")
         ui.label("不是告诉你买什么，而是让你看清那些数字怎么算、代表什么、什么时候会骗你。").classes("text-lg")
+        _user_header()
         with ui.card().classes("bg-red-50 w-full"):
             ui.label(teaching.DISCLAIMER).classes("text-sm")
         ui.label("示例组合").classes("text-xl font-semibold mt-4")
@@ -355,10 +407,54 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                 ui.label(f"计算失败：{type(exc).__name__}: {exc}").classes("warn")
                 ui.label("请先采集数据：python -m etf_lab.cli fetch --preset core").classes("muted")
 
+    def _save_controls(symbols, sliders, amount_input, mode_select) -> None:
+        """保存组合——**唯一需要登录的功能**。
+
+        没登录时这里只显示一句说明与链接，而不是把实验室锁起来。
+        """
+        user = _current_user()
+        with ui.card().classes("w-full"):
+            ui.label("保存这个组合").classes("text-lg")
+            if not user:
+                ui.label("登录后可以把当前权重存下来；不登录也能照常调参、计算与查看全部结果。").classes("muted")
+                ui.link("去登录 / 注册", "/login")
+                return
+            name_input = ui.input("组合名称", value="我的组合").classes("w-64")
+
+            def save() -> None:
+                raw = {s: float(sliders[s].value or 0) for s in symbols}
+                total = sum(raw.values())
+                if total <= 0:
+                    ui.notify("权重之和不能为 0", type="warning")
+                    return
+                weights = {s: v / total for s, v in raw.items() if v > 0}
+                definition = {
+                    "weights": weights,
+                    "dca": {
+                        "amount": float(amount_input.value or 2000),
+                        "mode": str(mode_select.value),
+                    },
+                }
+                con = repo.connect_users(_users_path(db_path))
+                try:
+                    auth.save_portfolio(con, user, str(name_input.value or "我的组合"), definition)
+                except auth.AuthError as exc:
+                    ui.notify(str(exc), type="warning")
+                    return
+                finally:
+                    con.close()
+                ui.notify("已保存，可在「我的组合」里打开", type="positive")
+
+            ui.button("保存", on_click=save)
+            ui.label(
+                "只保存权重与定投计划，**不保存计算结果**——结果随数据版本变化，"
+                "存下来只会变成过期数字。"
+            ).classes("muted")
+
     @ui.page("/lab")
     async def lab() -> None:
         ui.dark_mode().enable()
-        ui.link("← 返回首页", "/")
+        _user_header()
         ui.label("自定义组合实验室").classes("text-2xl font-bold")
         ui.label("拖动权重，然后点计算——所有数字与示例页面走完全相同的一套计算代码。").classes("muted")
 
@@ -387,9 +483,27 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
             mode_select = ui.select({"fixed": "固定金额", "value_avg": "价值平均"}, value="fixed", label="定投方式")
             ui.button("计算", on_click=lambda: _run_lab(symbols, sliders, amount_input, mode_select, db_path, output))
 
-        # 给个合理初值，让人一进来就能点"计算"看到东西
-        sliders[symbols[0]].value = 100
-        amounts[symbols[0]].set_text("100%")
+        # 从「我的组合」带过来的定义：只用于预填，不自动计算
+        # （自动算会让页面在打开瞬间就跑一次重计算，而用户可能只是想改一改）
+        loaded = app.storage.user.pop("load_definition", None)
+        if loaded:
+            for symbol, weight in (loaded.get("weights") or {}).items():
+                if symbol in sliders:
+                    percent = int(round(float(weight) * 100))
+                    sliders[symbol].value = percent
+                    amounts[symbol].set_text(f"{percent}%")
+            dca = loaded.get("dca") or {}
+            if dca.get("amount"):
+                amount_input.value = float(dca["amount"])
+            if dca.get("mode") in ("fixed", "value_avg"):
+                mode_select.value = dca["mode"]
+            ui.label("已载入你保存的组合权重，点「计算」即可重算。").classes("muted")
+        elif symbols:
+            # 给个合理初值，让人一进来就能点"计算"看到东西
+            sliders[symbols[0]].value = 100
+            amounts[symbols[0]].set_text("100%")
+
+        _save_controls(symbols, sliders, amount_input, mode_select)
 
     async def _run_lab(symbols, sliders, amount_input, mode_select, db_path, output) -> None:
         raw = {s: float(sliders[s].value or 0) for s in symbols}
@@ -419,6 +533,129 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                 spinner.delete()
                 ui.label(f"计算失败：{type(exc).__name__}: {exc}").classes("warn")
 
+    @ui.page("/login")
+    def login_page() -> None:
+        ui.dark_mode().enable()
+        _user_header()
+        ui.label("登录 / 注册").classes("text-2xl font-bold")
+        ui.label(
+            "账号只用来保存你自己的组合。不登录也能使用全部分析功能，"
+            "匿名状态下不会往磁盘写任何一行。"
+        ).classes("muted")
+
+        username = ui.input("用户名").classes("w-64")
+        password = ui.input("口令", password=True, password_toggle_button=True).classes("w-64")
+        message = ui.label().classes("warn")
+
+        def do_register() -> None:
+            try:
+                con = repo.connect_users(_users_path(db_path))
+                try:
+                    name = auth.register(con, str(username.value or ""), str(password.value or ""))
+                finally:
+                    con.close()
+            except auth.AuthError as exc:
+                message.set_text(str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                message.set_text(f"注册失败：{type(exc).__name__}: {exc}")
+                return
+            app.storage.user["username"] = name
+            ui.notify(f"已注册并登录：{name}", type="positive")
+            ui.navigate.to("/portfolios")
+
+        def do_login() -> None:
+            try:
+                con = repo.connect_users(_users_path(db_path))
+                try:
+                    ok = auth.authenticate(con, str(username.value or ""), str(password.value or ""))
+                finally:
+                    con.close()
+            except Exception as exc:  # noqa: BLE001
+                message.set_text(f"登录失败：{type(exc).__name__}: {exc}")
+                return
+            if not ok:
+                # 不区分"用户不存在"与"口令错误"
+                message.set_text("用户名或口令不对")
+                return
+            app.storage.user["username"] = auth.normalize_username(str(username.value))
+            ui.notify("已登录", type="positive")
+            ui.navigate.to("/portfolios")
+
+        with ui.row():
+            ui.button("登录", on_click=do_login)
+            ui.button("注册新账号", on_click=do_register).props("outline")
+        ui.label(f"口令至少 {auth.MIN_PASSWORD_LENGTH} 位；用 PBKDF2-HMAC-SHA256 加盐存储。").classes("muted")
+        ui.label(
+            "部署到公网请务必走 HTTPS——本项目没有做登录限流与口令找回，"
+            "面向的是本地或自托管的单机使用。"
+        ).classes("muted")
+
+    @ui.page("/logout")
+    def logout_page() -> None:
+        ui.dark_mode().enable()
+        app.storage.user.pop("username", None)
+        app.storage.user.pop("load_definition", None)
+        _user_header()
+        ui.label("已退出登录。未登录状态下依然可以使用全部功能。").classes("muted")
+
+    @ui.page("/portfolios")
+    def portfolios_page() -> None:
+        ui.dark_mode().enable()
+        _user_header()
+        user = _current_user()
+        if not user:
+            ui.label("这个页面需要登录——它是**唯一**需要登录的地方。").classes("text-xl")
+            ui.link("去登录", "/login")
+            return
+
+        ui.label(f"{user} 保存的组合").classes("text-2xl font-bold")
+        listing = ui.column().classes("w-full")
+
+        def refresh() -> None:
+            listing.clear()
+            con = repo.connect_users(_users_path(db_path))
+            try:
+                rows = auth.list_portfolios(con, user)
+            finally:
+                con.close()
+            with listing:
+                if not rows:
+                    ui.label("还没有保存过组合。去实验室调好权重后点保存。").classes("muted")
+                    return
+                for row in rows:
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(row["name"]).classes("w-48")
+                        ui.label(row["updated_at"]).classes("muted")
+
+                        def load(identifier: str = row["id"]) -> None:
+                            con2 = repo.connect_users(_users_path(db_path))
+                            try:
+                                payload = auth.load_portfolio(con2, user, identifier)
+                            finally:
+                                con2.close()
+                            if payload is None:
+                                ui.notify("这个组合已经不在了", type="warning")
+                                refresh()
+                                return
+                            app.storage.user["load_definition"] = payload["definition"]
+                            ui.navigate.to("/lab")
+
+                        def remove(identifier: str = row["id"], name: str = row["name"]) -> None:
+                            con2 = repo.connect_users(_users_path(db_path))
+                            try:
+                                auth.delete_portfolio(con2, user, identifier)
+                            finally:
+                                con2.close()
+                            ui.notify(f"已删除「{name}」", type="info")
+                            refresh()
+
+                        ui.button("在实验室打开", on_click=load).props("flat")
+                        ui.button("删除", on_click=remove).props("flat color=negative")
+
+        refresh()
+        ui.link("去实验室调权重", "/lab")
+
     @ui.page("/concepts")
     def concepts() -> None:
         ui.dark_mode().enable()
@@ -440,4 +677,12 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                 continue
 
     app.on_startup(_warm_cache)
-    ui.run(host=host, port=port, title="ETF 组合数值实验室", reload=False, show=False, favicon="📊")
+    ui.run(
+        host=host,
+        port=port,
+        title="ETF 组合数值实验室",
+        reload=False,
+        show=False,
+        favicon="📊",
+        storage_secret=_storage_secret(),
+    )
