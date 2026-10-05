@@ -131,6 +131,74 @@ def bs_greeks(
     )
 
 
+def bs_price_array(
+    S: np.ndarray | float,
+    K: float,
+    T: float,
+    r: float,
+    sigma: float,
+    option_type: OptionType = "put",
+    q: float = 0.0,
+) -> np.ndarray:
+    """向量化的 Black-Scholes 价格。
+
+    与 :func:`bs_price` 公式一致，由测试逐点比对。用于一次评估大量标的价格
+    （泰勒残差实验、路径重估），把 4.8 万次标量调用压成一次数组运算。
+    """
+    spot = np.asarray(S, dtype=float)
+    if option_type not in ("call", "put"):
+        raise ValueError(f"option_type 只能是 'call' 或 'put'，收到 {option_type!r}")
+    if T <= 0 or sigma <= 0:
+        forward_intrinsic = spot * np.exp(-q * T) - K * np.exp(-r * T)
+        if option_type == "call":
+            return np.maximum(forward_intrinsic, 0.0)
+        return np.maximum(-forward_intrinsic, 0.0)
+    vol_sqrt_t = sigma * np.sqrt(T)
+    d1 = (np.log(spot / K) + (r - q + 0.5 * sigma**2) * T) / vol_sqrt_t
+    d2 = d1 - vol_sqrt_t
+    if option_type == "call":
+        return spot * np.exp(-q * T) * stats.norm.cdf(d1) - K * np.exp(-r * T) * stats.norm.cdf(d2)
+    return K * np.exp(-r * T) * stats.norm.cdf(-d2) - spot * np.exp(-q * T) * stats.norm.cdf(-d1)
+
+
+def bs_delta_gamma_array(
+    S: np.ndarray | float,
+    K: float,
+    T: float,
+    r: float,
+    sigma: float,
+    option_type: OptionType = "put",
+    q: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """向量化的 delta 与 gamma，一次算一批标的价格。
+
+    为什么需要它：路径复制模拟要逐日重算 Greeks，若按标量逐个调用
+    ``bs_greeks``，一次 4000 条路径 × 253 天的模拟会跑到几十分钟（实测跑不完）。
+    公式与 :func:`bs_greeks` 完全一致，并由测试逐点比对——
+    向量化实现与标量实现分叉，是这类代码最典型的隐患。
+    """
+    spot = np.asarray(S, dtype=float)
+    if option_type not in ("call", "put"):
+        raise ValueError(f"option_type 只能是 'call' 或 'put'，收到 {option_type!r}")
+    if T <= 0 or sigma <= 0:
+        # 退化情形：delta 为阶跃函数、gamma 为 0
+        if option_type == "call":
+            delta = np.where(spot > K, 1.0, 0.0)
+        else:
+            delta = np.where(spot < K, -1.0, 0.0)
+        return np.asarray(delta, dtype=float), np.zeros_like(spot)
+    vol_sqrt_t = sigma * np.sqrt(T)
+    d1 = (np.log(spot / K) + (r - q + 0.5 * sigma**2) * T) / vol_sqrt_t
+    phi = stats.norm.pdf(d1)
+    discount = np.exp(-q * T)
+    if option_type == "call":
+        delta = discount * stats.norm.cdf(d1)
+    else:
+        delta = discount * (stats.norm.cdf(d1) - 1.0)
+    gamma = discount * phi / (spot * vol_sqrt_t)
+    return np.asarray(delta, dtype=float), np.asarray(gamma, dtype=float)
+
+
 def finite_difference_greeks(
     S: float,
     K: float,

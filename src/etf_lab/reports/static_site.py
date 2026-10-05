@@ -27,7 +27,7 @@ import pandas as pd
 from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.content.episodes import EPISODES
-from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, metrics, rates as rates_mod, returns, simulate as simulate_mod
+from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, hedge as hedge_mod, metrics, rates as rates_mod, returns, simulate as simulate_mod
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
@@ -297,6 +297,118 @@ def _monte_carlo_tables(result: Mapping[str, Any]) -> str:
         "厚尾真正影响的是**路径回撤**与短期限风险，这一点在 GARCH 与 Student-t 的深度回撤概率上看得出来。</p>"
         f"{warn_html}"
         f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
+    )
+
+
+def _hedge_block(nav: pd.Series, rf_used: float, derivatives_block: Mapping[str, Any]) -> dict[str, Any]:
+    """Delta-Gamma 复制实验：不买期权，靠调仓复制「持仓 + 认沽」的到期收益。
+
+    回答的是很实际的问题：**如果我的 ETF 没有上市期权，靠调整仓位能不能近似买保险。**
+    标的波动率取组合自身的历史波动率（252 日），因此所有数字都以"占组合的比例"读。
+    """
+    try:
+        port_returns = nav.pct_change().dropna()
+        if len(port_returns) < 250:
+            return {}
+        term = (derivatives_block or {}).get("term_structure") or {}
+        sigma = term.get("252")
+        if sigma is None or not np.isfinite(sigma) or sigma <= 0:
+            sigma = float(port_returns.std(ddof=1) * np.sqrt(252))
+        if not np.isfinite(sigma) or sigma <= 0:
+            return {}
+
+        plan = hedge_mod.ReplicationPlan(
+            spot=1.0,
+            sigma=float(sigma),
+            r=float(rf_used),
+            tenor_years=1.0,
+            strike_ratio=0.95,
+            target_ratio=0.5,
+            cost_bps=15.0,
+        )
+        result = hedge_mod.analyse(plan, n_paths=2000, seed=20260101).as_dict()
+        result["available"] = True
+        return result
+    except Exception:  # noqa: BLE001 - 复制实验失败不应影响其它面板
+        return {}
+
+
+def _hedge_tables(result: Mapping[str, Any]) -> str:
+    block = result.get("hedge") or {}
+    runs = block.get("runs") or []
+    if not block.get("available") or not runs:
+        return "<p class='note'>复制实验需要足够长的历史样本，当前不可用。</p>"
+
+    plan = block.get("plan") or {}
+    premium = block.get("premium") or {}
+    best = block.get("best") or {}
+    sensitivity = block.get("sensitivity") or []
+    taylor = block.get("taylor") or []
+
+    rows = ""
+    for row in runs:
+        is_best = row["rebalance_days"] == best.get("rebalance_days")
+        mark = " ★" if is_best else ""
+        rows += (
+            f'<tr><td>{row["rebalance_days"]} 日{mark}</td>'
+            f'<td>{theme.num(row["error_mean"], 5)}</td>'
+            f'<td>{theme.pct(row["error_std"])}</td>'
+            f'<td>{theme.pct(row["predicted_std"])}</td>'
+            f'<td>{theme.num(row["scale_ratio"], 2)}</td>'
+            f'<td>{theme.pct(row["mean_cost"])}</td>'
+            f'<td>{row["mean_trades"]:.1f}</td>'
+            f'<td>{theme.pct(row["total_burden"])}</td></tr>'
+        )
+
+    sensitivity_rows = "".join(
+        f'<tr><td>{row["cost_bps"]:.0f} bp</td><td>{row["optimal_rebalance_days"]} 日</td>'
+        f'<td>{theme.pct(row["optimal_error_std"])}</td><td>{theme.pct(row["optimal_mean_cost"])}</td>'
+        f'<td>{theme.pct(row["optimal_total_burden"])}</td></tr>'
+        for row in sensitivity
+    )
+
+    taylor_rows = ""
+    for row in taylor:
+        if row["shock"] > 0.12:
+            continue
+        taylor_rows += (
+            f'<tr><td>{row["days"]} 日</td><td>{row["shock"]:.0%}</td>'
+            f'<td>{theme.pct(row["mean_abs_move_pct"])}</td>'
+            f'<td>{theme.pct(row["mean_abs_residual_pct"])}</td>'
+            f'<td class="warn">{theme.pct(row["max_abs_residual_pct"])}</td></tr>'
+        )
+
+    return (
+        "<p class='note'>这是<b>复制实验</b>：目标是复现「持仓 + 认沽」的到期收益，"
+        "做法是不买期权、只调整仓位。"
+        f"标的一年波动率 {theme.pct(plan.get('sigma'))}，认沽行权价为期初的 {plan.get('strike_ratio'):.0%}，"
+        f"目标把下跌参与降到 {plan.get('target_ratio'):.0%}。<br>"
+        "因为 95% 行权价的认沽 delta 只有约 −0.29，要把下行参与压到 50% 需要 "
+        f"<b>{plan.get('notional_units'):.3f} 倍</b>持仓的认沽名义量——"
+        "这就是「delta 不等于名义量」的直接体现。</p>"
+        "<table><thead><tr><th>再平衡间隔</th><th>毛误差均值</th><th>复制误差标准差</th>"
+        "<th>解析预期</th><th>模拟/解析</th><th>累计交易成本</th><th>交易次数</th><th>总负担</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+        "<p class='note'>「毛误差」已把交易成本加回去，是纯粹的复制偏差；"
+        f"「解析预期」是 Boyle–Emanuel 的 √(Σ½Γ²σ⁴S⁴Δt²)，模拟/解析比值 {theme.num(best.get('scale_ratio'), 2)} "
+        "说明闭式公式与模拟吻合。<br>"
+        "「总负担」= 误差标准差 + 累计成本，<b>这个 1:1 权重是人为选择，不是定理</b>："
+        "换个风险厌恶系数，最优频率就会移动。</p>"
+        "<p class='note'>★ = 本设定下的最优频率。注意它<b>随成本水平移动</b>：</p>"
+        "<table><thead><tr><th>单边成本</th><th>最优间隔</th><th>该点误差标准差</th><th>该点成本</th><th>总负担</th></tr></thead>"
+        f"<tbody>{sensitivity_rows}</tbody></table>"
+        "<p class='note'>与直接买认沽相比：权利金相当于组合的 "
+        f"<b>{theme.pct(premium.get('premium_pct_of_portfolio'))}</b>"
+        "（一次性、确定付出，换来精确的 payoff）；"
+        "动态复制不需要期权市场，但要准备等额的复制资金，代价是持续交易成本与复制误差。<br>"
+        "本项目的认沽价格是 <b>Black-Scholes 理论值</b>——没有期权行情，"
+        "真实隐含波动率远高于历史波动率（恐慌时尤其），实际成本只会更高。</p>"
+        "<p class='note'>Delta-Gamma-Theta 二阶近似的适用边界（残差占期权价格比例）：</p>"
+        "<table><thead><tr><th>步长</th><th>冲击幅度</th><th>平均价格变动</th><th>平均残差</th><th>最大残差</th></tr></thead>"
+        f"<tbody>{taylor_rows}</tbody></table>"
+        "<p class='note'>小步长小冲击下近似几乎精确；但冲击一大，二阶多项式会给出"
+        "<b>超过期权本身价格</b>的变动——期权价格有下界 0 而上界为行权价，多项式没有。"
+        "所以「用 Greeks 估算极端行情损失」在大幅冲击下是危险的。</p>"
     )
 
 
@@ -710,6 +822,7 @@ def compute_preset(
     premium = _premium_block(con, symbols, spec.weights, start)
     exposure_block = _exposure_block(con, aligned, spec.weights, start, name_by_symbol)
     derivatives_block = _derivatives_block(nav, aligned, rf_used)
+    hedge_block = _hedge_block(nav, rf_used, derivatives_block)
     monte_carlo_block = _monte_carlo_block(nav, rf_used)
     rates_block = _rates_block(curve, rate_env, aligned, spec.weights, name_by_symbol)
 
@@ -803,6 +916,7 @@ def compute_preset(
         "premium_discount": premium,
         "exposure": exposure_block,
         "derivatives": derivatives_block,
+        "hedge": hedge_block,
         "monte_carlo": monte_carlo_block,
         "rates": rates_block,
         "episodes": episode_block,
@@ -1061,6 +1175,8 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     + "这正是「最需要保险时保险最贵」的来源。</p>", span=5)}
   {theme.panel("保护成本曲线", theme.figure_div(figures.fig_protection_curve(result), f"{prefix}fig-prot", figs), span=7)}
   {theme.panel("保护成本与 Greeks（理论值）", _derivatives_table(result), span=12)}
+  {theme.panel("Delta-Gamma 复制：频率权衡", theme.figure_div(figures.fig_hedge_tradeoff(result), f"{prefix}fig-hedge", figs), span=5)}
+  {theme.panel("复制实验详情（误差、成本与近似边界）", _hedge_tables(result), span=7)}
   {theme.panel("蒙特卡洛：终值分布扇形图", theme.figure_div(figures.fig_mc_fan(result), f"{prefix}fig-mcfan", figs), span=7)}
   {theme.panel("终值分布直方图", theme.figure_div(figures.fig_mc_histogram(result), f"{prefix}fig-mchist", figs), span=5)}
   {theme.panel("收敛诊断：路径数够不够", theme.figure_div(figures.fig_mc_convergence(result), f"{prefix}fig-mcconv", figs)
@@ -1174,7 +1290,8 @@ def render_concepts(*, root: str = "") -> str:
         "tracking_error", "adjustment", "risk_contribution", "premium_discount",
         "arithmetic_vs_geometric", "leverage_unwind", "liquidity_spiral",
         "implied_volatility", "credit_spread_cds", "fx_exposure", "duration",
-        "greeks", "protection_cost", "monte_carlo", "tail_crossover", "hedging",
+        "greeks", "protection_cost", "monte_carlo", "tail_crossover",
+        "delta_gamma_replication", "hedging",
     ]
     cards = "".join(theme.card_html(k) for k in keys)
     body = f"""

@@ -406,6 +406,59 @@ def fig_rate_scenarios(result: dict) -> go.Figure:
     return theme.dark(fig, height=260)
 
 
+def fig_hedge_tradeoff(result: dict) -> go.Figure:
+    """频率权衡：双对数图上误差 ∝ √Δt、成本 ∝ 1/Δt，交点就是最优频率。
+
+    这张图是整个复制实验的核心——两条方向相反的幂律线，把"多久调一次仓"
+    从经验问题变成可计算的交叉点。
+    """
+    runs = (result.get("hedge") or {}).get("runs") or []
+    fig = go.Figure()
+    if runs:
+        xs = [row["rebalance_days"] for row in runs]
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=[row["error_std"] for row in runs],
+                name="复制误差标准差（∝ √Δt）",
+                mode="lines+markers",
+                line={"color": P["accent"], "width": 2},
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=[row["mean_cost"] for row in runs],
+                name="累计交易成本（∝ 1/Δt）",
+                mode="lines+markers",
+                line={"color": P["warn"], "width": 2},
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=[row["total_burden"] for row in runs],
+                name="总负担（两者之和）",
+                mode="lines+markers",
+                line={"color": P["ok"], "width": 2, "dash": "dot"},
+            )
+        )
+        best = (result.get("hedge") or {}).get("best") or {}
+        if best:
+            fig.add_vline(
+                x=best.get("rebalance_days"),
+                line={"color": P["gold"], "dash": "dash", "width": 1},
+                annotation_text=f"最优 {best.get('rebalance_days')} 日",
+                annotation_position="top",
+            )
+    fig.update_layout(
+        title="再平衡频率权衡（双对数）",
+        xaxis={"title": "再平衡间隔（交易日）", "type": "log"},
+        yaxis={"title": "占组合比例", "type": "log", "tickformat": ".1%"},
+    )
+    return theme.dark(fig, height=340)
+
+
 def fig_per_asset(result: dict) -> go.Figure:
     symbols = list(result["per_asset"])
     fig = go.Figure()

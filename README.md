@@ -59,7 +59,7 @@ uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels 
 #    未做 editable 安装也能直接跑（下面统一依赖 PYTHONPATH）：
 #    PowerShell:  $env:PYTHONPATH='src'
 
-# 2) 跑数值校验测试（这一步必须全绿，共 177 项）
+# 2) 跑数值校验测试（这一步必须全绿，共 203 项）
 .venv\Scripts\python.exe -m pytest -q
 
 # 3) 采集数据到本地 DuckDB（生成 data/lab.duckdb，已 gitignore）
@@ -110,14 +110,14 @@ src/etf_lab/
 │   ├── rates.py       # 无风险利率、久期回归、利率冲击情景
 │   ├── episodes.py    # 历史情节重放（区间统计与覆盖度）
 │   ├── optimize.py    # 组合优化（规划中）
-│   └── hedge.py       # Delta-Gamma 再平衡模拟（规划中）
+│   └── hedge.py       # Delta-Gamma 复制与再平衡频率（Boyle–Emanuel 标度律）
 ├── data/          # DuckDB schema 与读写层（唯一允许碰数据库的地方）
 ├── etl/           # 采集：tencent（主）/ sohu（校验）/ fund_nav / bond_yield / eastmoney（备用）
 ├── reports/       # A 路线：静态站生成（计算与渲染分离）
 ├── app/           # C 路线：NiceGUI 界面
 ├── services/      # 缓存、进程池封装、可 pickle 的作业函数
 ├── content/       # 教学卡片文案（怎么算/说明什么/何时会误导）
-├── tests/         # 数值对照测试（177 项，含采集解析与防呆）
+├── tests/         # 数值对照测试（203 项，含采集解析与防呆）
 └── cli.py         # 统一命令入口
 ```
 
@@ -168,8 +168,9 @@ src/etf_lab/
 - [x] M5 RBSA 敞口矩阵 + 加入板块的边际影响
 - [ ] M6 压力测试 + 登录保存组合（当前纯匿名）
 - [ ] M7 组合优化（`core/optimize.py`，尚未实现）
-- [ ] M8 Delta-Gamma 再平衡模拟（`core/hedge.py`，依赖期权行情）
-- [ ] 数据补全：股指期货基差、ETF 期权行情（把 Greeks 从理论值换成隐含波动率）、汇率
+- [x] M8 Delta-Gamma 复制与再平衡频率（`core/hedge.py`）：误差 ∝ √Δt、成本 ∝ 1/Δt，
+      模拟与 Boyle–Emanuel 解析预期的比值 1.06~1.15，最优频率随成本水平移动
+- [ ] M9 数据补全：股指期货基差、ETF 期权行情（把 Greeks 与认沽定价从理论值换成隐含波动率）、汇率
 - [x] 数据补全：国债收益率曲线（无风险利率不再靠假设）
 
 **决策依据、数据源实测结论与已修复缺陷的留档见 [ARCHITECTURE.md](ARCHITECTURE.md)。**

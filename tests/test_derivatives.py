@@ -78,6 +78,48 @@ def test_gamma_is_largest_at_the_money() -> None:
     assert atm > 0 and otm > 0
 
 
+def test_vectorised_delta_gamma_matches_scalar_implementation() -> None:
+    """向量化 delta/gamma 必须与标量 ``bs_greeks`` 逐点一致。
+
+    复制模拟为了性能改用向量化 Greeks（标量版跑 4000 条路径要十几分钟），
+    而"向量化实现与标量实现分叉"正是这类优化最典型的隐患，所以必须钉住。
+    """
+    spots = np.array([2.0, 3.5, 4.43, 5.0, 8.0])
+    for option_type in ("call", "put"):
+        delta, gamma = derivatives.bs_delta_gamma_array(spots, 4.5, 0.75, 0.02, 0.18, option_type)
+        for index, spot in enumerate(spots):
+            scalar = derivatives.bs_greeks(float(spot), 4.5, 0.75, 0.02, 0.18, option_type)
+            assert delta[index] == pytest.approx(scalar.delta, rel=1e-12)
+            assert gamma[index] == pytest.approx(scalar.gamma, rel=1e-12)
+
+
+def test_vectorised_delta_gamma_degenerate_cases() -> None:
+    """到期或零波动时，向量化实现也要给出阶跃 delta 与零 gamma（不能出 NaN）。"""
+    spots = np.array([3.0, 4.5, 6.0])
+    delta, gamma = derivatives.bs_delta_gamma_array(spots, 4.5, 0.0, 0.02, 0.18, "call")
+    assert np.allclose(delta, [0.0, 0.0, 1.0])
+    assert np.allclose(gamma, 0.0)
+    put_delta, _ = derivatives.bs_delta_gamma_array(spots, 4.5, 0.0, 0.02, 0.18, "put")
+    assert np.allclose(put_delta, [-1.0, 0.0, 0.0])
+    with pytest.raises(ValueError):
+        derivatives.bs_delta_gamma_array(spots, 4.5, 1.0, 0.02, 0.18, "straddle")
+
+
+def test_vectorised_price_matches_scalar_implementation() -> None:
+    """向量化定价必须与标量 ``bs_price`` 逐点一致（含退化情形）。"""
+    spots = np.array([2.0, 3.5, 4.43, 5.0, 8.0])
+    for option_type in ("call", "put"):
+        array = derivatives.bs_price_array(spots, 4.5, 0.75, 0.02, 0.18, option_type)
+        for index, spot in enumerate(spots):
+            scalar = derivatives.bs_price(float(spot), 4.5, 0.75, 0.02, 0.18, option_type)
+            assert array[index] == pytest.approx(scalar, rel=1e-12)
+    # 到期与零波动：只剩远期内在价值 max(S − K, 0)
+    expired = derivatives.bs_price_array(spots, 4.5, 0.0, 0.02, 0.18, "call")
+    assert np.allclose(expired, [0.0, 0.0, 0.0, 0.5, 3.5])
+    zero_vol = derivatives.bs_price_array(spots, 4.5, 1.0, 0.0, 0.0, "call")
+    assert np.allclose(zero_vol, [0.0, 0.0, 0.0, 0.5, 3.5])
+
+
 def test_long_option_has_bounded_delta_and_negative_theta() -> None:
     call = derivatives.bs_greeks(S0, K0, T0, R0, SIGMA0, "call")
     put = derivatives.bs_greeks(S0, K0, T0, R0, SIGMA0, "put")

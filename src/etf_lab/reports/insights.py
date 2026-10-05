@@ -313,12 +313,12 @@ UNLOCK_CATALOG: tuple[dict[str, Any], ...] = (
     },
     {
         "key": "hedge_simulation",
-        "title": "对冲头寸的 Delta-Gamma 再平衡模拟",
-        "card": "protection_cost",
-        "trigger": "组合布置期权对冲头寸",
-        "requirement": "option_hedge",
-        "implemented": False,
-        "pending": "需要期权行情与逐日再平衡模拟；当前只给静态保护成本",
+        "title": "Delta-Gamma 复制与再平衡频率",
+        "card": "delta_gamma_replication",
+        "trigger": "任何组合（没有期权市场时的替代方案）",
+        "requirement": "always",
+        "implemented": True,
+        "pending": "认沽用 Black-Scholes 理论定价（无期权行情）；标的按 GBM 生成，厚尾下误差尾部会被低估",
     },
     {
         "key": "basis",

@@ -30,6 +30,7 @@ FIGURE_SUFFIXES = (
     "fig-yhist",
     "fig-vol",
     "fig-prot",
+    "fig-hedge",
     "fig-mcfan",
     "fig-mchist",
     "fig-mcconv",
