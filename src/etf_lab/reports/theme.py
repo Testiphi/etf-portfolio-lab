@@ -69,10 +69,10 @@ h2 { font-size:14px; margin:0; font-weight:600; color:var(--fg); }
 .titlebar .q { color:var(--muted); font-size:13px; }
 
 .grid { display:grid; grid-template-columns:repeat(12, minmax(0,1fr)); gap:12px; }
-.span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; }
-.span-6 { grid-column: span 6; } .span-8 { grid-column: span 8; }
-.span-12 { grid-column: span 12; }
-@media (max-width: 1000px) { .span-3,.span-4,.span-6,.span-8 { grid-column: span 12; } }
+/*__SPAN_RULES__*/
+/* 窄屏一律单列：用 .grid > * 而不是逐个列出 span 类——
+   逐个列出时漏一个（本项目就漏了 span-5 / span-7），那一块在窄屏上就不会折叠。 */
+@media (max-width: 1000px) { .grid > * { grid-column: span 12; } }
 
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
 .panel > header { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:8px; }
@@ -162,6 +162,12 @@ footer .meta { max-width:1500px; margin:0 auto; }
 .gear-custom[open] summary { border-color:var(--accent); color:var(--accent); }
 .gear-pane { display:none; }
 """
+
+# span 规则由代码生成 1..12，而不是手写。
+# 手写时漏掉一个值，那一块面板在 12 栅格里就只占 1 格、被挤成细条——
+# 本项目新增期权与蒙特卡洛面板时正是漏了 span-5 与 span-7，六块面板全部渲染异常。
+_SPAN_RULES = "\n".join(f".span-{i} {{ grid-column: span {i}; }}" for i in range(1, 13))
+STYLE = STYLE.replace("/*__SPAN_RULES__*/", _SPAN_RULES)
 
 
 def esc(text: Any) -> str:

@@ -210,7 +210,39 @@ def test_curves_are_downsampled_but_keep_extremes() -> None:
     assert str(index[777].date()) not in without, "对照组：不保留极值时确实会丢"
 
 
+def test_every_span_class_used_has_a_css_rule(tmp_path: Path) -> None:
+    """每个用到的 span-N 都必须有对应的 CSS 规则。
+
+    这是实际发生过的故障：新增期权与蒙特卡洛面板时用了 span-5 / span-7，
+    而 CSS 里只手写了 3/4/6/8/12——那六块面板因此没有 grid-column，
+    在 12 栅格里只占 1 格、被挤成细条，看上去就是「渲染有误」。
+    现在 span 规则由代码生成 1..12，并由这条测试守住。
+    """
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    result = static_site.compute_preset(con, _spec("one"))
+    con.close()
+
+    figs: dict = {}
+    html = static_site.render_dashboard(result, prefix="one-", figs=figs)
+
+    used = set(re.findall(r"\bspan-(\d+)\b", html))
+    defined = set(re.findall(r"\.span-(\d+)\s*\{", theme.STYLE))
+    assert used, "页面上应当用到 span 类"
+    assert used <= defined, f"以下 span 类没有 CSS 规则：{sorted(used - defined, key=int)}"
+    # 1..12 必须全部有定义，避免再次出现「用到才发现没写」的情况
+    assert defined == {str(i) for i in range(1, 13)}
+
+
+def test_narrow_screen_collapses_all_panels() -> None:
+    """窄屏折叠要用 .grid > * 通配，而不是逐个列出 span 类（漏一个就不折叠）。"""
+    assert ".grid > *" in theme.STYLE
+    assert "@media (max-width: 1000px)" in theme.STYLE
+
+
 def test_standalone_page_ids_are_unique(tmp_path: Path) -> None:
+    """独立组合页：id 唯一、自带数据文件与装载脚本。"""
     db = tmp_path / "lab.duckdb"
     _seed_db(db)
     con = repo.connect(db)
