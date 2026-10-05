@@ -187,6 +187,21 @@ def test_premium_discount_silent_when_small() -> None:
     assert not any(i.key == "premium_discount" for i in insights.evaluate(result))
 
 
+def test_implemented_unlocks_must_be_available_without_special_positions() -> None:
+    """当前架构下，已实现模块的面板是**无条件渲染**的，因此它不能要求"必须持有某种头寸"。
+
+    否则会出现自相矛盾：面板已经显示出来了，解锁清单却写着「🔒 需期权头寸」——
+    本项目真的出现过这个不一致（期权 Greeks 面板已上线，解锁状态却仍是锁定）。
+    要么把面板改成条件渲染，要么把这类模块的 requirement 改成 always。
+    """
+    for item in insights.UNLOCK_CATALOG:
+        if item["implemented"]:
+            assert item["requirement"] == "always", (
+                f"{item['key']} 已实现但要求 {item['requirement']}；"
+                "面板会无条件出现，与解锁状态矛盾"
+            )
+
+
 def test_slow_recovery_and_small_sample_trigger() -> None:
     result = _base_result()
     result["max_drawdown_info"] = {"depth": -0.55}

@@ -27,7 +27,7 @@ import pandas as pd
 from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.content.episodes import EPISODES
-from etf_lab.core import correlation, dca, episodes as episodes_mod, exposure as exposure_mod, metrics, returns
+from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, metrics, returns
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
@@ -195,6 +195,75 @@ def _exposure_table(result: Mapping[str, Any]) -> str:
         f"<tbody>{body}</tbody></table>"
         f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
         f"{warn_html}"
+    )
+
+
+def _derivatives_block(nav: pd.Series, aligned: pd.DataFrame, rf_annual: float) -> dict[str, Any]:
+    """波动率期限结构 + 保护成本表（买保险要花多少钱）。
+
+    **必须说清的边界**：本项目没有期权行情，因此这里全部是**历史波动率**下的理论值，
+    不是市场报价的隐含波动率。隐含波动率是市场对未来波动的定价，
+    市场恐慌时它远高于历史波动率——这正是"最需要保险时保险最贵"的来源。
+    把这个区别写清楚，比多给几个希腊字母重要。
+    """
+    try:
+        port_returns = nav.pct_change().dropna()
+        term = derivatives_mod.volatility_term_structure(port_returns)
+        tenor_map = {1 / 12: 21, 3 / 12: 63, 6 / 12: 126, 1.0: 252}
+        tenor_vol = {
+            str(tenor): (None if not np.isfinite(term.get(window, float("nan"))) else float(term[window]))
+            for tenor, window in tenor_map.items()
+        }
+        usable = {float(k): v for k, v in tenor_vol.items() if v}
+        protection = derivatives_mod.protection_table(spot=1.0, vol_by_tenor=usable)
+        per_asset = {
+            str(symbol): {
+                str(window): (None if not np.isfinite(value) else round(float(value), 6))
+                for window, value in derivatives_mod.volatility_term_structure(aligned[symbol].pct_change().dropna()).items()
+            }
+            for symbol in aligned.columns
+        }
+        return {
+            "term_structure": {str(k): (None if not np.isfinite(v) else round(float(v), 6)) for k, v in term.items()},
+            "tenor_vol": {k: (None if v is None else round(v, 6)) for k, v in tenor_vol.items()},
+            "protection": [
+                {k: (None if isinstance(v, float) and not np.isfinite(v) else round(float(v), 8)) for k, v in row.items()}
+                for row in protection
+            ],
+            "per_asset": per_asset,
+            "implied_vol_available": False,
+            "note": (
+                "波动率取自历史波动率（不同回看窗口），Greeks 是在该假设下的理论值；"
+                "隐含波动率需要期权行情，本项目尚未接入"
+            ),
+        }
+    except Exception:  # noqa: BLE001 - 期权模块算不出来不应影响其它面板
+        return {}
+
+
+def _derivatives_table(result: Mapping[str, Any]) -> str:
+    block = result.get("derivatives") or {}
+    rows = block.get("protection") or []
+    if not rows:
+        return "<p class='note'>期权模块需要价格数据，当前不可用。</p>"
+    body = ""
+    for row in rows:
+        body += (
+            f'<tr><td>{row["tenor_months"]:.0f} 个月</td><td>{row["moneyness"]:.0%}</td>'
+            f'<td>{theme.pct(row["sigma"])}</td>'
+            f'<td class="warn">{theme.pct(row["cost_pct"])}</td>'
+            f'<td>{theme.pct(row["annualized_cost_pct"])}</td>'
+            f'<td>{theme.num(row["delta"], 3)}</td><td>{theme.num(row["gamma"], 4)}</td>'
+            f'<td>{theme.num(row["vega"], 4)}</td><td>{theme.num(row["theta"], 5)}</td></tr>'
+        )
+    return (
+        "<table><thead><tr><th>期限</th><th>行权价 / 现价</th><th>所用波动率</th>"
+        "<th>成本</th><th>年化成本</th><th>Delta</th><th>Gamma</th><th>Vega</th><th>Theta</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+        "<p class='note'>「成本」是买入认沽期权的权利金占标的价值的比例；"
+        "「年化成本」= 成本 ÷ 期限，用来回答「给持仓买一年保险，每年要付出本金的百分之几」。</p>"
+        f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
     )
 
 
@@ -393,6 +462,7 @@ def compute_preset(
 
     premium = _premium_block(con, symbols, spec.weights, start)
     exposure_block = _exposure_block(con, aligned, spec.weights, start, name_by_symbol)
+    derivatives_block = _derivatives_block(nav, aligned, rf_annual)
 
     # 历史情节重放：基准指数可回溯到 2005 年，组合净值则受成分标的上市时间限制
     try:
@@ -481,6 +551,7 @@ def compute_preset(
         "composition": composition,
         "premium_discount": premium,
         "exposure": exposure_block,
+        "derivatives": derivatives_block,
         "episodes": episode_block,
         "diagnostics": diagnostics,
         "max_drawdown_info": {
@@ -710,6 +781,12 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
   {theme.panel("各标的年化 vs 最大回撤", theme.figure_div(figures.fig_per_asset(result), f"{prefix}fig-asset", figs), span=4)}
   {theme.panel("因子敞口矩阵（热力图）", theme.figure_div(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo", figs), span=12)}
   {theme.panel("敞口明细与拟合质量", _exposure_table(result), span=12)}
+  {theme.panel("波动率期限结构", theme.figure_div(figures.fig_vol_term_structure(result), f"{prefix}fig-vol", figs)
+    + "<p class='note'>不同回看窗口下的<b>历史</b>波动率。它不是隐含波动率——"
+    + "隐含波动率是市场对<b>未来</b>波动的定价，恐慌时会显著高于历史波动率，"
+    + "这正是「最需要保险时保险最贵」的来源。</p>", span=5)}
+  {theme.panel("保护成本曲线", theme.figure_div(figures.fig_protection_curve(result), f"{prefix}fig-prot", figs), span=7)}
+  {theme.panel("保护成本与 Greeks（理论值）", _derivatives_table(result), span=12)}
   {theme.panel("历史情节重放", theme.figure_div(figures.fig_episodes(result), f"{prefix}fig-epi", figs)
     + _episodes_block(result), span=12)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}

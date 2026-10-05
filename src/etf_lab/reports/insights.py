@@ -304,12 +304,21 @@ UNLOCK_CATALOG: tuple[dict[str, Any], ...] = (
     },
     {
         "key": "greeks",
-        "title": "期权 Greeks 与 IV 曲面",
+        "title": "期权 Greeks 与保护成本",
         "card": "greeks",
+        "trigger": "任何组合（保护成本是通用问题）",
+        "requirement": "always",
+        "implemented": True,
+        "pending": "隐含波动率需要期权行情（尚未接入）；当前用历史波动率给理论值",
+    },
+    {
+        "key": "hedge_simulation",
+        "title": "对冲头寸的 Delta-Gamma 再平衡模拟",
+        "card": "protection_cost",
         "trigger": "组合布置期权对冲头寸",
         "requirement": "option_hedge",
         "implemented": False,
-        "pending": "需要 ETF 期权行情与 core/derivatives.py",
+        "pending": "需要期权行情与逐日再平衡模拟；当前只给静态保护成本",
     },
     {
         "key": "basis",

@@ -26,6 +26,8 @@ FIGURE_SUFFIXES = (
     "fig-roll",
     "fig-asset",
     "fig-expo",
+    "fig-vol",
+    "fig-prot",
     "fig-epi",
 )
 

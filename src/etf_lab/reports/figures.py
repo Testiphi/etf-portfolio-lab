@@ -168,6 +168,65 @@ def fig_episodes(result: dict) -> go.Figure:
     return theme.dark(fig, height=300)
 
 
+def fig_vol_term_structure(result: dict) -> go.Figure:
+    """历史波动率的"期限结构"：各标的在不同回看窗口下的年化波动率。"""
+    block = result.get("derivatives") or {}
+    per_asset = block.get("per_asset") or {}
+    fig = go.Figure()
+    for index, (symbol, term) in enumerate(per_asset.items()):
+        windows = sorted(int(k) for k in term)
+        fig.add_trace(
+            go.Scatter(
+                x=windows,
+                y=[term[str(w)] for w in windows],
+                name=symbol,
+                mode="lines+markers",
+                line={"color": theme.SERIES_COLORS[index % len(theme.SERIES_COLORS)]},
+            )
+        )
+    overall = block.get("term_structure") or {}
+    if overall:
+        windows = sorted(int(k) for k in overall)
+        fig.add_trace(
+            go.Scatter(
+                x=windows,
+                y=[overall[str(w)] for w in windows],
+                name="组合",
+                mode="lines+markers",
+                line={"color": P["fg"], "width": 3, "dash": "dot"},
+            )
+        )
+    fig.update_layout(
+        title="历史波动率期限结构",
+        xaxis={"title": "回看交易日"},
+        yaxis={"title": "年化波动率", "tickformat": ".0%"},
+    )
+    return theme.dark(fig, height=300)
+
+
+def fig_protection_curve(result: dict) -> go.Figure:
+    """保护成本曲线：买入认沽期权的权利金占标的价值的比例。"""
+    rows = (result.get("derivatives") or {}).get("protection") or []
+    fig = go.Figure()
+    for index, tenor in enumerate(sorted({row["tenor_years"] for row in rows})):
+        subset = sorted([row for row in rows if row["tenor_years"] == tenor], key=lambda row: row["moneyness"])
+        fig.add_trace(
+            go.Scatter(
+                x=[row["moneyness"] for row in subset],
+                y=[row["cost_pct"] for row in subset],
+                name=f"{tenor * 12:.0f} 个月",
+                mode="lines+markers",
+                line={"color": theme.SERIES_COLORS[index % len(theme.SERIES_COLORS)]},
+            )
+        )
+    fig.update_layout(
+        title="保护成本：买入认沽期权要花多少",
+        xaxis={"title": "行权价 / 现价", "tickformat": ".0%"},
+        yaxis={"title": "成本（占标的价值）", "tickformat": ".1%"},
+    )
+    return theme.dark(fig, height=300)
+
+
 def fig_per_asset(result: dict) -> go.Figure:
     symbols = list(result["per_asset"])
     fig = go.Figure()
