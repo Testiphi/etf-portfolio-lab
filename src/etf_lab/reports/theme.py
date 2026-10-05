@@ -124,6 +124,17 @@ td.ok { color:var(--ok); }
   padding:5px 7px; border-radius:5px; font-size:12px; color:var(--gold); overflow-x:auto; }
 .card p { margin:6px 0 0; }
 .card .mislead { color:var(--warn); }
+.card .story { color:var(--gold); font-style:italic; margin:6px 0 0; }
+.card h3 .badge { margin-left:6px; font-weight:400; vertical-align:middle; }
+
+/* 情节复盘：每一段是一个可展开的"战役" */
+details.episode { background:var(--panel-alt); border-left:3px solid var(--gold); border-radius:6px; }
+details.episode > summary { cursor:pointer; padding:8px 12px; font-size:13px; }
+details.episode .body { padding:0 12px 10px; color:var(--muted); font-size:12.5px; }
+details.episode .hook { color:var(--fg); }
+details.episode .nums { display:flex; gap:14px; flex-wrap:wrap; margin:8px 0; }
+details.episode .nums span { font-family:var(--mono); }
+details.episode .nums b { font-weight:600; }
 
 ul.presets { list-style:none; padding:0; margin:0; display:grid; gap:8px; }
 ul.presets li { background:var(--panel-alt); border:1px solid var(--line); border-radius:7px; padding:10px 12px; display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
@@ -203,16 +214,27 @@ def dark(fig: go.Figure, height: int | None = None) -> go.Figure:
 
 
 def card_html(key: str) -> str:
-    """一张知识卡片（展开后显示）。"""
+    """一张知识卡片（展开后显示）。
+
+    可选的 ``story`` 是剧情钩子——先给处境，再给定义；``scope`` 用来标明
+    这个工具是否在本组合的可投范围内。把小说里的 CDS 当成能买的东西，
+    是这类内容最容易犯的错，所以这个徽章是必需的。
+    """
     card = teaching.card(key)
-    return (
-        f'<div class="card">'
-        f'<h3>{esc(card["title"])}</h3>'
-        f'<div class="formula">{esc(card["formula"])}</div>'
-        f'<p><strong>说明什么：</strong>{esc(card["means"])}</p>'
-        f'<p class="mislead"><strong>什么时候会骗人：</strong>{esc(card["misleads"])}</p>'
-        f"</div>"
-    )
+    parts = [f'<h3>{esc(card["title"])}']
+    scope = card.get("scope")
+    if scope == "concept_only":
+        parts.append('<span class="badge pending">境外/银行间工具 · 不在你的可投范围</span>')
+    elif scope == "portfolio":
+        parts.append('<span class="badge on">本组合可用的场内工具</span>')
+    parts.append("</h3>")
+    body = "".join(parts)
+    if card.get("story"):
+        body += f'<p class="story">{esc(card["story"])}</p>'
+    body += f'<div class="formula">{esc(card["formula"])}</div>'
+    body += f'<p><strong>说明什么：</strong>{esc(card["means"])}</p>'
+    body += f'<p class="mislead"><strong>什么时候会骗人：</strong>{esc(card["misleads"])}</p>'
+    return f'<div class="card">{body}</div>'
 
 
 def metric_tile(label: str, value: str, card: str | None = None, note: str | None = None, warn: bool = False) -> str:

@@ -26,7 +26,8 @@ import pandas as pd
 
 from etf_lab import __version__
 from etf_lab.content import teaching
-from etf_lab.core import correlation, dca, metrics, returns
+from etf_lab.content.episodes import EPISODES
+from etf_lab.core import correlation, dca, episodes as episodes_mod, exposure as exposure_mod, metrics, returns
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
@@ -38,6 +39,17 @@ ROLLING_WINDOW = 252
 """滚动夏普窗口（约一年）。"""
 ADJUSTMENT_STEP = 0.01
 """复权因子单日变化超过 1% 视为一次分红/份额折算事件。"""
+
+# 敞口因子：刻意选**经济含义不同**的少数几个（大盘/中盘/成长/红利/债），
+# 而不是把所有宽基指数都塞进去——高度同质的因子会让 beta 互相稀释，数字看着精确但没意义。
+EXPOSURE_FACTORS: tuple[tuple[str, str], ...] = (
+    ("000300", "沪深300"),
+    ("000905", "中证500"),
+    ("399006", "创业板指"),
+    ("000922", "中证红利"),
+    ("000012", "上证国债"),
+)
+BENCHMARK_INDEX = "000300"
 
 
 # --------------------------------------------------------------------------- #
@@ -58,6 +70,98 @@ def _asset_summary(nav: pd.Series) -> dict[str, Any]:
         "max_drawdown": round(info.depth, 6),
         "total_return": round(returns.total_return(nav), 6),
     }
+
+
+def _exposure_block(
+    con,
+    aligned_prices: pd.DataFrame,
+    weights: Mapping[str, float],
+    start: Any,
+    name_by_symbol: Mapping[str, str],
+) -> dict[str, Any]:
+    """因子敞口矩阵：对每只标的与整个组合各做一次 RBSA。"""
+    try:
+        codes = [code for code, _ in EXPOSURE_FACTORS]
+        index_panel = repo.read_index_panel(con, codes, start=start)
+        if index_panel.empty:
+            return {}
+        # 因子之间也要求同日有数据，保证各行的样本区间一致、beta 可比
+        index_panel = index_panel.dropna(how="any")
+        if len(index_panel) < exposure_mod.DEFAULT_MIN_OBS:
+            return {}
+        factor_returns = returns.to_returns(index_panel, method="simple")
+        factor_returns = factor_returns.rename(columns=dict(EXPOSURE_FACTORS))
+        asset_returns = returns.to_returns(aligned_prices, method="simple")
+        matrix = exposure_mod.exposure_matrix(asset_returns, weights, factor_returns)
+        for row in matrix["rows"]:
+            row["name"] = "组合" if row["key"] == "__portfolio__" else name_by_symbol.get(row["key"], row["key"])
+        matrix["factor_labels"] = {label: label for _, label in EXPOSURE_FACTORS}
+        return matrix
+    except Exception:  # noqa: BLE001 - 敞口算不出来不应影响其它面板
+        return {}
+
+
+def _episodes_block(result: Mapping[str, Any]) -> str:
+    """历史情节重放：先把数字摆出来，再让"当时发生了什么"解释它。"""
+    items = list(result.get("episodes") or [])
+    if not items:
+        return "<p class='note'>没有可重放的历史情节。</p>"
+
+    blocks: list[str] = []
+    for episode in items:
+        portfolio = episode.get("portfolio") or {}
+        market = episode.get("market") or {}
+        chips: list[str] = []
+        if portfolio:
+            css = "warn" if float(portfolio["total_return"]) < 0 else "ok"
+            chips.append(f'组合 <b class="{css}">{theme.pct(portfolio["total_return"])}</b>')
+            chips.append(f'最深回撤 <b>{theme.pct(portfolio["max_drawdown"])}</b>')
+            chips.append(f'最差单日 <b>{theme.pct(portfolio["worst_day"])}</b>')
+            chips.append(f'<span>{portfolio["n_obs"]} 个交易日</span>')
+        else:
+            chips.append('<b class="warn">组合未覆盖</b>')
+        if market:
+            chips.append(f'沪深300 <b>{theme.pct(market["total_return"])}</b>')
+        summary = theme.esc(episode["title"]) + "　" + "　".join(chips)
+
+        coverage = episodes_mod.COVERAGE_LABELS.get(str(episode.get("coverage")), "")
+        body = f'<p class="hook">{theme.esc(episode["hook"])}</p>'
+        if coverage:
+            body += f'<p class="note">{theme.esc(coverage)}</p>'
+        body += f"<p>{theme.esc(episode['what_happened'])}</p>"
+        cards = "".join(theme.card_html(t) for t in episode.get("terms", []) if t in teaching.CARDS)
+        if cards:
+            body += f'<div style="display:grid;gap:8px;margin-top:8px">{cards}</div>'
+        blocks.append(f'<details class="episode"><summary>{summary}</summary><div class="body">{body}</div></details>')
+
+    return '<div class="insights">' + "".join(blocks) + "</div>"
+
+
+def _exposure_table(result: Mapping[str, Any]) -> str:
+    block = result.get("exposure") or {}
+    rows = block.get("rows") or []
+    if not rows:
+        return "<p class='note'>敞口矩阵需要指数数据，当前不可用。</p>"
+    body = ""
+    for row in rows:
+        if row.get("error"):
+            body += f'<tr><td>{theme.esc(row["name"])}</td><td colspan="4" class="warn">{theme.esc(row["error"][:48])}</td></tr>'
+            continue
+        body += (
+            f'<tr><td>{theme.esc(row["name"])}</td>'
+            f'<td>{theme.num(row["r_squared"], 3)}</td>'
+            f'<td>{theme.pct(row["alpha_annual"])}</td>'
+            f'<td>{theme.pct(row["tracking_error"])}</td>'
+            f'<td>{row["n_obs"]}</td></tr>'
+        )
+    warnings = block.get("warnings") or []
+    warn_html = "".join(f'<p class="note warn-text">{theme.esc(w)}</p>' for w in warnings)
+    return (
+        "<table><thead><tr><th>标的</th><th>R²</th><th>Alpha(年化)</th><th>跟踪误差</th><th>样本</th></tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+        f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
+        f"{warn_html}"
+    )
 
 
 def _premium_block(con, symbols: Sequence[str], weights: Mapping[str, float], start: Any) -> dict[str, Any]:
@@ -234,6 +338,7 @@ def compute_preset(
 
     meta = repo.read_etf_meta(con, symbols)
     class_by_symbol = dict(zip(meta.get("symbol", []), meta.get("asset_class", []))) if not meta.empty else {}
+    name_by_symbol = dict(zip(meta.get("symbol", []), meta.get("name", []))) if not meta.empty else {}
     by_class: dict[str, float] = {}
     for symbol, weight in spec.weights.items():
         asset_class = str(class_by_symbol.get(symbol, "unknown"))
@@ -244,6 +349,15 @@ def compute_preset(
     }
 
     premium = _premium_block(con, symbols, spec.weights, start)
+    exposure_block = _exposure_block(con, aligned, spec.weights, start, name_by_symbol)
+
+    # 历史情节重放：基准指数可回溯到 2005 年，组合净值则受成分标的上市时间限制
+    try:
+        benchmark_panel = repo.read_index_panel(con, [BENCHMARK_INDEX], start="2005-01-01")
+        benchmark = benchmark_panel[BENCHMARK_INDEX] if not benchmark_panel.empty else None
+    except Exception:  # noqa: BLE001
+        benchmark = None
+    episode_block = episodes_mod.replay(nav, benchmark, EPISODES)
 
     # 定投：按组合净值定投（隐含"每日再平衡"假设，页面上必须写明）
     dca_runs: dict[str, Any] = {}
@@ -323,6 +437,8 @@ def compute_preset(
         "risk_contribution": risk,
         "composition": composition,
         "premium_discount": premium,
+        "exposure": exposure_block,
+        "episodes": episode_block,
         "diagnostics": diagnostics,
         "max_drawdown_info": {
             "depth": round(info.depth, 6),
@@ -541,6 +657,10 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
   {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), f"{prefix}fig-roll"), span=4)}
   {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
   {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), f"{prefix}fig-asset"), span=4)}
+  {theme.panel("因子敞口矩阵", theme.figure_html(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo"), span=7)}
+  {theme.panel("敞口拟合质量", _exposure_table(result), span=5)}
+  {theme.panel("历史情节重放", theme.figure_html(figures.fig_episodes(result), f"{prefix}fig-epi")
+    + _episodes_block(result), span=12)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
   {theme.panel("可解锁模块", _unlocks_block(result), span=12)}
 </div>
@@ -615,7 +735,9 @@ def render_concepts(*, root: str = "") -> str:
     keys = [
         "annualized_return", "volatility", "sharpe", "sortino", "calmar", "max_drawdown",
         "var", "cvar", "xirr", "correlation", "diversification_ratio", "beta",
-        "tracking_error", "adjustment", "risk_contribution", "fx_exposure", "duration",
+        "tracking_error", "adjustment", "risk_contribution", "premium_discount",
+        "arithmetic_vs_geometric", "leverage_unwind", "liquidity_spiral",
+        "implied_volatility", "credit_spread_cds", "fx_exposure", "duration",
         "greeks", "monte_carlo", "hedging",
     ]
     cards = "".join(theme.card_html(k) for k in keys)

@@ -120,6 +120,52 @@ def fig_dca(result: dict) -> go.Figure:
     return theme.dark(fig, height=280)
 
 
+def fig_exposure_heatmap(result: dict) -> go.Figure:
+    """因子敞口矩阵：行是各标的与组合，列是因子，格子里是受约束回归的 β。"""
+    block = result.get("exposure") or {}
+    rows = [r for r in (block.get("rows") or []) if r.get("betas")]
+    factors = list(block.get("factors") or [])
+    if not rows or not factors:
+        fig = go.Figure()
+        fig.update_layout(title="因子敞口矩阵（数据不足）")
+        return theme.dark(fig, height=220)
+
+    z = [[float(r["betas"].get(f, 0.0)) for f in factors] for r in rows]
+    labels = [[f"{v:.2f}" for v in row] for row in z]
+    # 把 R² 写进行标签：R² 很低时 β 本身没有意义，让不可靠一眼可见
+    row_labels = [f'{r["name"]}（R²={float(r["r_squared"]):.2f}）' for r in rows]
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=factors,
+            y=row_labels,
+            colorscale="Blues",
+            text=labels,
+            texttemplate="%{text}",
+            colorbar={"title": "β", "thickness": 12, "outlinewidth": 0},
+        )
+    )
+    fig.update_layout(title="因子敞口矩阵（β，受约束回归）")
+    return theme.dark(fig, height=max(220, 70 + 26 * len(rows)))
+
+
+def fig_episodes(result: dict) -> go.Figure:
+    """把几个历史情节里的组合收益与市场收益并排放，落差一眼可见。"""
+    items = [e for e in (result.get("episodes") or []) if e.get("portfolio") or e.get("market")]
+    if not items:
+        fig = go.Figure()
+        fig.update_layout(title="历史情节（数据不足）")
+        return theme.dark(fig, height=200)
+    titles = [e["title"] for e in items]
+    portfolio = [float(e["portfolio"]["total_return"]) if e.get("portfolio") else None for e in items]
+    market = [float(e["market"]["total_return"]) if e.get("market") else None for e in items]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=titles, y=portfolio, name="你的组合", marker_color=P["accent"]))
+    fig.add_trace(go.Bar(x=titles, y=market, name="沪深300", marker_color=P["muted"]))
+    fig.update_layout(title="历史情节重放：组合 vs 市场", barmode="group", yaxis={"tickformat": ".0%"})
+    return theme.dark(fig, height=300)
+
+
 def fig_per_asset(result: dict) -> go.Figure:
     symbols = list(result["per_asset"])
     fig = go.Figure()

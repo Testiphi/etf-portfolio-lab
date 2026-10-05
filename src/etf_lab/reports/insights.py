@@ -326,8 +326,8 @@ UNLOCK_CATALOG: tuple[dict[str, Any], ...] = (
         "card": "beta",
         "trigger": "任何组合（有指数数据即可）",
         "requirement": "always",
-        "implemented": False,
-        "pending": "需要 core/exposure.py 与行业指数",
+        "implemented": True,
+        "pending": "",
     },
     {
         "key": "monte_carlo",

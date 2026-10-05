@@ -85,6 +85,17 @@ td.ok { color:var(--ok); }
   padding:5px 7px; border-radius:5px; font-size:12px; color:var(--gold); overflow-x:auto; }
 .card p { margin:6px 0 0; }
 .card .mislead { color:var(--warn); }
+.card .story { color:var(--gold); font-style:italic; margin:6px 0 0; }
+.card h3 .badge { margin-left:6px; font-weight:400; vertical-align:middle; }
+
+/* 情节复盘：每一段是一个可展开的"战役" */
+details.episode { background:var(--panel-alt); border-left:3px solid var(--gold); border-radius:6px; }
+details.episode > summary { cursor:pointer; padding:8px 12px; font-size:13px; }
+details.episode .body { padding:0 12px 10px; color:var(--muted); font-size:12.5px; }
+details.episode .hook { color:var(--fg); }
+details.episode .nums { display:flex; gap:14px; flex-wrap:wrap; margin:8px 0; }
+details.episode .nums span { font-family:var(--mono); }
+details.episode .nums b { font-weight:600; }
 
 ul.presets { list-style:none; padding:0; margin:0; display:grid; gap:8px; }
 ul.presets li { background:var(--panel-alt); border:1px solid var(--line); border-radius:7px; padding:10px 12px; display:flex; justify-content:space-between; gap:12px; align-items:baseline; }

@@ -17,7 +17,16 @@ from etf_lab.data import repo
 from etf_lab.presets import PortfolioSpec
 from etf_lab.reports import static_site
 
-FIGURE_SUFFIXES = ("fig-nav", "fig-attrib", "fig-risk", "fig-dca", "fig-roll", "fig-asset")
+FIGURE_SUFFIXES = (
+    "fig-nav",
+    "fig-attrib",
+    "fig-risk",
+    "fig-dca",
+    "fig-roll",
+    "fig-asset",
+    "fig-expo",
+    "fig-epi",
+)
 
 
 def _seed_db(path: Path) -> None:
