@@ -280,6 +280,55 @@ def fetch_index_prices(
 
 
 # --------------------------------------------------------------------------- #
+# 基金净值（折溢价与分红的来源）
+# --------------------------------------------------------------------------- #
+def fetch_fund_nav(
+    con,
+    symbols: Iterable[str] | None = None,
+    start: str | dt.date = "2012-01-01",
+    end: str | dt.date | None = None,
+) -> list[FetchReport]:
+    """抓取基金单位净值/累计净值，写入 ``fund_nav``。
+
+    有了它才能算**折溢价率**（市场价/单位净值 − 1），把"买贵了"这件事从收益里分离出来。
+    接口结构参考作者另一个项目 etf-tracker（东财主源 + 新浪兜底）。
+    """
+    from etf_lab.etl import fund_nav as fund_nav_client
+
+    codes = list(symbols or ETF_PRESET)
+    reports: list[FetchReport] = []
+    with _session() as session:
+        for code in codes:
+            try:
+                result = fund_nav_client.fetch_nav_history(code, start=start, end=end, session=session)
+                frame = result.frame.copy()
+                frame["symbol"] = code
+                frame["dividend"] = None
+                frame["daily_change"] = frame["daily_change_pct"]
+                rows = repo.upsert(
+                    con,
+                    "fund_nav",
+                    frame,
+                    ["symbol", "date", "nav", "acc_nav", "dividend", "daily_change"],
+                )
+                reports.append(
+                    FetchReport(
+                        target="fund_nav",
+                        key=code,
+                        ok=True,
+                        name=result.name,
+                        rows=rows,
+                        start=str(frame["date"].min().date()),
+                        end=str(frame["date"].max().date()),
+                        source=result.source,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                reports.append(FetchReport(target="fund_nav", key=code, ok=False, error=f"{type(exc).__name__}: {exc}"))
+    return reports
+
+
+# --------------------------------------------------------------------------- #
 # 数据源探针
 # --------------------------------------------------------------------------- #
 PENDING_SOURCES: tuple[str, ...] = (
@@ -288,8 +337,6 @@ PENDING_SOURCES: tuple[str, ...] = (
     "option_daily（ETF 期权与隐含波动率）：尚未接入",
     "fx_rate（汇率）：跨境 ETF 的汇率贡献待接入",
 )
-
-
 def probe_sources() -> list[dict[str, Any]]:
     """探测各源在当前网络环境下是否可用（M0 证伪步骤）。"""
     with _session() as session:

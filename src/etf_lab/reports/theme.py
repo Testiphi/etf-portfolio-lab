@@ -75,16 +75,21 @@ h2 { font-size:14px; margin:0; font-weight:600; color:var(--fg); }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
 .panel > header { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:8px; }
 
-/* 指标键盘：每格是可以点开的 <details>，展开后是公式与陷阱 */
+/* 指标键盘：每格是可以点开的 <details>，展开后是公式与陷阱。
+   注意选择器写成 .tile .label 而不是 details.tile .label——
+   没有关联知识卡片的那几格是普通 <div>，早期版本用 details 前缀选择器导致
+   「偏度/超额峰度/样本交易日」三格的标签与数值变成行内元素、样式全丢。 */
 .tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(146px,1fr)); gap:8px; }
-details.tile { background:var(--panel-alt); border:1px solid var(--line); border-radius:7px; }
+.tile { background:var(--panel-alt); border:1px solid var(--line); border-radius:7px; min-width:0; }
+.tile.static { padding:8px 10px; }
 details.tile > summary { list-style:none; cursor:pointer; padding:8px 10px; }
 details.tile > summary::-webkit-details-marker { display:none; }
-details.tile .label { display:block; color:var(--muted); font-size:11.5px; }
-details.tile .val { display:block; font-family:var(--mono); font-size:18px; font-weight:600; }
+.tile .label { display:block; color:var(--muted); font-size:11.5px; }
+.tile .val { display:block; font-family:var(--mono); font-size:18px; font-weight:600; }
 details.tile[open] { border-color:var(--accent); }
 details.tile .body { padding:0 10px 10px; color:var(--muted); font-size:12px; border-top:1px dashed var(--line); }
 .hintmark { color:var(--accent); font-size:11px; }
+.val.warn-val { color:var(--warn); }
 
 /* 洞察条：数据触发时出现，点开才是知识 */
 .insights { display:grid; gap:8px; }
@@ -129,6 +134,20 @@ footer { border-top:1px solid var(--line); background:var(--panel); color:var(--
 footer .disclaimer { max-width:1500px; margin:0 auto 4px; }
 footer .meta { max-width:1500px; margin:0 auto; }
 .note { color:var(--muted); font-size:12px; margin-top:8px; }
+
+/* 档位切换：纯 CSS（radio + 兄弟选择器），无 JS。
+   目的是"一进页面数据就摆在面前"，切组合不刷新、不跳页。 */
+.gear-input { position:absolute; opacity:0; pointer-events:none; }
+.gear-labels { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+.gear-labels label { padding:5px 14px; border:1px solid var(--line); border-radius:14px;
+  cursor:pointer; color:var(--muted); font-size:13px; user-select:none; }
+.gear-labels label:hover { border-color:var(--accent); color:var(--fg); }
+.gear-custom { margin-left:auto; }
+.gear-custom summary { list-style:none; cursor:pointer; padding:5px 14px; border:1px dashed var(--line);
+  border-radius:14px; color:var(--muted); font-size:13px; }
+.gear-custom summary::-webkit-details-marker { display:none; }
+.gear-custom[open] summary { border-color:var(--accent); color:var(--accent); }
+.gear-pane { display:none; }
 """
 
 
@@ -196,18 +215,21 @@ def card_html(key: str) -> str:
     )
 
 
-def metric_tile(label: str, value: str, card: str | None = None, note: str | None = None) -> str:
-    """指标键盘里的一格：默认只有标签与数值，点开才看到公式与陷阱。"""
+def metric_tile(label: str, value: str, card: str | None = None, note: str | None = None, warn: bool = False) -> str:
+    """指标键盘里的一格：默认只有标签与数值，点开才看到公式与陷阱。
+
+    没有关联知识卡片时渲染成普通 ``<div class="tile static">``——
+    结构与有卡片的一致，样式因此不会丢（本项目踩过这个坑）。
+    """
     mark = '<span class="hintmark"> ◂</span>' if card else ""
+    value_class = "val warn-val" if warn else "val"
+    head = f'<span class="label">{esc(label)}{mark}</span><span class="{value_class}">{esc(value)}</span>'
     if not card:
-        return f'<div class="tile" style="background:var(--panel-alt);border:1px solid var(--line);border-radius:7px;padding:8px 10px"><span class="label">{esc(label)}</span><span class="val">{esc(value)}</span></div>'
+        return f'<div class="tile static">{head}</div>'
     body = card_html(card)
     if note:
         body += f'<p class="note">{esc(note)}</p>'
-    return (
-        f'<details class="tile"><summary><span class="label">{esc(label)}{mark}</span>'
-        f'<span class="val">{esc(value)}</span></summary><div class="body">{body}</div></details>'
-    )
+    return f'<details class="tile"><summary>{head}</summary><div class="body">{body}</div></details>'
 
 
 def insight_html(insight: Mapping[str, Any], cards_lookup: Any = None) -> str:

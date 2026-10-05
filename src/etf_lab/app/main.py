@@ -170,7 +170,6 @@ def _render_result(result: dict[str, Any]) -> None:
     with ui.tabs().classes("w-full") as tabs:
         tab_nav = ui.tab("净值与回撤")
         tab_dca = ui.tab("定投收益率的三种口径")
-        tab_corr = ui.tab("相关性")
         tab_assets = ui.tab("各标的表现")
     with ui.tab_panels(tabs, value=tab_nav).classes("w-full"):
         with ui.tab_panel(tab_nav):
@@ -199,9 +198,6 @@ def _render_result(result: dict[str, Any]) -> None:
         with ui.tab_panel(tab_dca):
             ui.plotly(figures.fig_dca(result)).classes("w-full")
             _dca_table(result)
-        with ui.tab_panel(tab_corr):
-            ui.plotly(figures.fig_correlation(result)).classes("w-full")
-            ui.label("相关性用过去日收益估计；危机时相关性会上升，分散化在最需要它的时候变弱。").classes("muted")
         with ui.tab_panel(tab_assets):
             ui.plotly(figures.fig_per_asset(result)).classes("w-full")
             ui.table(

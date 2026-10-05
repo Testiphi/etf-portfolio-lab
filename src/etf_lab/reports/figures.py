@@ -120,26 +120,6 @@ def fig_dca(result: dict) -> go.Figure:
     return theme.dark(fig, height=280)
 
 
-def fig_correlation(result: dict) -> go.Figure:
-    corr = result["correlation"]
-    fig = go.Figure(
-        go.Heatmap(
-            z=corr["matrix"],
-            x=corr["labels"],
-            y=corr["labels"],
-            zmin=-1,
-            zmax=1,
-            colorscale="RdBu",
-            reversescale=True,
-            text=[[("" if v is None else f"{v:.2f}") for v in row] for row in corr["matrix"]],
-            texttemplate="%{text}",
-            colorbar={"title": "ρ", "thickness": 12, "outlinewidth": 0},
-        )
-    )
-    fig.update_layout(title="相关性矩阵（按聚类重排）")
-    return theme.dark(fig, height=320)
-
-
 def fig_per_asset(result: dict) -> go.Figure:
     symbols = list(result["per_asset"])
     fig = go.Figure()

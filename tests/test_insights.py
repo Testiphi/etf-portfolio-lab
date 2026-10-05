@@ -116,6 +116,45 @@ def test_dca_algorithm_gap_triggers_and_is_informational() -> None:
     assert "3.70%" in item.title and "6.90%" in item.title
 
 
+def test_arithmetic_vs_geometric_gap_triggers() -> None:
+    result = _base_result()
+    result["metrics"]["arithmetic_annualized_return"] = 0.1056
+    result["metrics"]["annualized_return"] = 0.0856
+    result["metrics"]["volatility_drag"] = 0.02
+    result["metrics"]["annualized_volatility"] = 0.1385
+    found = insights.evaluate(result)
+    item = next((i for i in found if i.key == "arithmetic_geometric_gap"), None)
+    assert item is not None
+    assert item.card == "arithmetic_vs_geometric"
+    assert "2.00%" in item.title
+    # 同时给出理论近似 σ²/2 作为对照
+    assert item.evidence["sigma_squared_over_2"] == pytest.approx(0.1385**2 / 2)
+
+
+def test_premium_discount_warns_and_flags_cross_border_lag() -> None:
+    """跨境 ETF 的溢价提醒必须同时说明"净值披露有时滞"，否则会高估多付的幅度。"""
+    result = _base_result()
+    result["premium_discount"] = {
+        "weighted_latest": 0.0411,
+        "max_abs_symbol": "513100",
+        "per_symbol": {"513100": {"latest": 0.1404}},
+    }
+    result["composition"] = {"has_cross_border": True}
+    found = insights.evaluate(result)
+    item = next((i for i in found if i.key == "premium_discount"), None)
+    assert item is not None
+    assert item.level == "warn"
+    assert "14.04%" in item.title
+    assert "时滞" in item.title
+    assert item.evidence["cross_border_timing_lag"] is True
+
+
+def test_premium_discount_silent_when_small() -> None:
+    result = _base_result()
+    result["premium_discount"] = {"weighted_latest": 0.0003}
+    assert not any(i.key == "premium_discount" for i in insights.evaluate(result))
+
+
 def test_slow_recovery_and_small_sample_trigger() -> None:
     result = _base_result()
     result["max_drawdown_info"] = {"depth": -0.55}

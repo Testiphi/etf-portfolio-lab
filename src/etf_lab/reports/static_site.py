@@ -28,6 +28,7 @@ from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.core import correlation, dca, metrics, returns
 from etf_lab.data import repo
+from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
 from etf_lab.reports import figures, insights as insights_mod, theme
 
@@ -57,6 +58,47 @@ def _asset_summary(nav: pd.Series) -> dict[str, Any]:
         "max_drawdown": round(info.depth, 6),
         "total_return": round(returns.total_return(nav), 6),
     }
+
+
+def _premium_block(con, symbols: Sequence[str], weights: Mapping[str, float], start: Any) -> dict[str, Any]:
+    """折溢价率：**未复权市场价**与基金单位净值之比 − 1。
+
+    必须用未复权价：前复权价已被分红调整过，拿它算折溢价会把历史分红误算成折价。
+    没有净值数据时返回空字典，页面显示"—"，不阻塞整页。
+    """
+    try:
+        raw_panel = repo.read_price_panel(con, symbols, start=start, field="close")
+        nav_panel = repo.read_nav_panel(con, symbols, start=start)
+        if raw_panel.empty or nav_panel.empty:
+            return {}
+        per_symbol: dict[str, Any] = {}
+        for symbol in symbols:
+            if symbol not in raw_panel.columns or symbol not in nav_panel.columns:
+                continue
+            series = fund_nav.premium_discount(raw_panel[symbol], nav_panel[symbol])
+            if series.empty:
+                continue
+            per_symbol[symbol] = {
+                "latest": round(float(series.iloc[-1]), 6),
+                "mean": round(float(series.mean()), 6),
+                "max_abs": round(float(series.abs().max()), 6),
+                "as_of": str(series.index[-1].date()),
+                "n_obs": int(len(series)),
+            }
+        if not per_symbol:
+            return {}
+        total_weight = sum(float(weights[s]) for s in per_symbol) or 1.0
+        weighted_latest = sum(float(weights[s]) * per_symbol[s]["latest"] for s in per_symbol) / total_weight
+        worst = max(per_symbol, key=lambda s: abs(per_symbol[s]["latest"]))
+        return {
+            "per_symbol": per_symbol,
+            "weighted_latest": round(weighted_latest, 6),
+            "max_abs_symbol": worst,
+            "as_of": max(per_symbol[s]["as_of"] for s in per_symbol),
+            "note": "折溢价 = 未复权收盘价 / 单位净值 − 1；净值为基金公司披露口径",
+        }
+    except Exception:  # noqa: BLE001 - 缺净值数据不影响其它面板
+        return {}
 
 
 def _risk_contribution(rets: pd.DataFrame, weights: Mapping[str, float]) -> dict[str, Any]:
@@ -201,6 +243,8 @@ def compute_preset(
         **{f"has_{key}": key in by_class for key in ("broad", "bond", "gold", "cross_border", "industry")},
     }
 
+    premium = _premium_block(con, symbols, spec.weights, start)
+
     # 定投：按组合净值定投（隐含"每日再平衡"假设，页面上必须写明）
     dca_runs: dict[str, Any] = {}
     for mode in ("fixed", "value_avg"):
@@ -278,6 +322,7 @@ def compute_preset(
         "dca": dca_runs,
         "risk_contribution": risk,
         "composition": composition,
+        "premium_discount": premium,
         "diagnostics": diagnostics,
         "max_drawdown_info": {
             "depth": round(info.depth, 6),
@@ -341,23 +386,28 @@ def _page(title: str, body: str, *, root: str = "", data_version: str = "—") -
 def _metrics_keyboard(result: Mapping[str, Any]) -> str:
     """指标键盘：每格默认只有标签+数值，点开才出现公式与陷阱。"""
     m = result["metrics"]
-    tiles = [
-        ("年化收益", theme.pct(m.get("annualized_return")), "annualized_return"),
-        ("年化波动", theme.pct(m.get("annualized_volatility")), "volatility"),
-        ("夏普", theme.num(m.get("sharpe")), "sharpe"),
-        ("索提诺", theme.num(m.get("sortino")), "sortino"),
-        ("卡玛", theme.num(m.get("calmar")), "calmar"),
-        ("最大回撤", theme.pct(m.get("max_drawdown")), "max_drawdown"),
-        ("VaR 95% 历史", theme.pct(m.get("var_95_historical")), "var"),
-        ("VaR 95% 参数", theme.pct(m.get("var_95_parametric")), "var"),
-        ("CVaR 95%", theme.pct(m.get("cvar_95_historical")), "cvar"),
-        ("偏度", theme.num(m.get("skewness"), 3), None),
-        ("超额峰度", theme.num(m.get("excess_kurtosis"), 3), None),
-        ("样本交易日", str(m.get("n_obs")), None),
-        ("无风险利率", theme.pct(m.get("rf_annual_used")), "sharpe"),
-        ("时间加权年化", theme.pct(result.get("time_weighted_annualized")), "xirr"),
+    tiles: list[tuple[str, str, str | None, bool]] = [
+        ("年化收益（复合）", theme.pct(m.get("annualized_return")), "annualized_return", False),
+        ("算术平均年化", theme.pct(m.get("arithmetic_annualized_return")), "arithmetic_vs_geometric", False),
+        ("波动拖累", theme.pct(m.get("volatility_drag")), "arithmetic_vs_geometric", True),
+        ("年化波动", theme.pct(m.get("annualized_volatility")), "volatility", False),
+        ("夏普", theme.num(m.get("sharpe")), "sharpe", False),
+        ("索提诺", theme.num(m.get("sortino")), "sortino", False),
+        ("卡玛", theme.num(m.get("calmar")), "calmar", False),
+        ("最大回撤", theme.pct(m.get("max_drawdown")), "max_drawdown", True),
+        ("VaR 95% 历史", theme.pct(m.get("var_95_historical")), "var", False),
+        ("VaR 95% 参数", theme.pct(m.get("var_95_parametric")), "var", False),
+        ("CVaR 95%", theme.pct(m.get("cvar_95_historical")), "cvar", False),
+        ("偏度", theme.num(m.get("skewness"), 3), None, False),
+        ("超额峰度", theme.num(m.get("excess_kurtosis"), 3), None, False),
+        ("样本交易日", str(m.get("n_obs")), None, False),
+        ("无风险利率", theme.pct(m.get("rf_annual_used")), "sharpe", False),
+        ("组合折溢价", theme.pct((result.get("premium_discount") or {}).get("weighted_latest")), "premium_discount", False),
+        ("时间加权年化", theme.pct(result.get("time_weighted_annualized")), "xirr", False),
     ]
-    return '<div class="tiles">' + "".join(theme.metric_tile(label, value, card) for label, value, card in tiles) + "</div>"
+    return '<div class="tiles">' + "".join(
+        theme.metric_tile(label, value, card, warn=warn) for label, value, card, warn in tiles
+    ) + "</div>"
 
 
 def _drawdown_table(result: Mapping[str, Any]) -> str:
@@ -457,9 +507,10 @@ def _unlocks_block(result: Mapping[str, Any]) -> str:
     )
 
 
-def render_preset_page(result: Mapping[str, Any], *, root: str = "") -> str:
+def render_dashboard(result: Mapping[str, Any]) -> str:
+    """一个组合的完整仪表盘（不含页头页脚），供独立页与首屏档位切换共用。"""
     weights_chips = " · ".join(f"{theme.esc(s)} {w:.0%}" for s, w in result["weights"].items())
-    body = f"""
+    return f"""
 <div class="titlebar">
   <div>
     <h1>{theme.esc(result['name'])}</h1>
@@ -479,63 +530,75 @@ def render_preset_page(result: Mapping[str, Any], *, root: str = "") -> str:
     + theme.pct((result.get('metrics') or {}).get('total_return'))
     + " 之间的差额，就是复利与再平衡效应——归因相加不等于累计收益，这是它的固有难点。</p>", span=4)}
   {theme.panel("权重 vs 风险贡献", theme.figure_html(figures.fig_risk_vs_weight(result), "fig-risk"), span=6)}
-  {theme.panel("相关性矩阵", theme.figure_html(figures.fig_correlation(result), "fig-corr"), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
   {theme.panel("定投：市值 vs 累计投入", theme.figure_html(figures.fig_dca(result), "fig-dca"), span=6)}
-  {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), "fig-roll"), span=6)}
-  {theme.panel("各标的单独持有", _per_asset_table(result), span=6)}
-  {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), "fig-asset"), span=6)}
+  {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), "fig-roll"), span=4)}
+  {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
+  {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), "fig-asset"), span=4)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
   {theme.panel("可解锁模块", _unlocks_block(result), span=12)}
 </div>
 """
-    return _page(f"{result['name']} · ETF 组合数值实验室", body, root=root, data_version=str(result.get("data_version", "—")))
 
 
-def render_index(
-    preset_meta: Sequence[Mapping[str, Any]],
-    *,
-    counts: Mapping[str, int],
-    data_version: str,
-    root: str = "",
-) -> str:
-    rows = ""
-    for p in preset_meta:
-        if p.get("error"):
-            rows += f"<tr><td><a href='{root}{p['key']}.html'>{theme.esc(p['name'])}</a></td><td colspan='6' class='warn'>{theme.esc(p['error'][:60])}</td></tr>"
-            continue
-        m = p.get("metrics", {})
-        rows += (
-            f"<tr><td><a href='{root}{p['key']}.html'>{theme.esc(p['name'])}</a></td>"
-            f"<td>{theme.esc(p.get('start'))}</td><td>{theme.pct(m.get('annualized_return'))}</td>"
-            f"<td>{theme.pct(m.get('annualized_volatility'))}</td><td>{theme.num(m.get('sharpe'))}</td>"
-            f"<td class='warn'>{theme.pct(m.get('max_drawdown'))}</td>"
-            f"<td>{theme.pct(m.get('var_95_historical'))}</td></tr>"
-        )
-    counts_rows = "".join(f"<tr><td>{theme.esc(k)}</td><td>{v:,}</td></tr>" for k, v in counts.items() if v)
-    # 说明面板先在外面拼好：在 f-string 里嵌三引号会直接截断外层字符串
-    how_to_panel = (
-        '<p class="note">默认视图只有数字和图表，没有讲解。每格数字里的 '
-        '<span class="hintmark">◂</span> 可点开，里面是公式与「什么时候会骗人」。'
-        "页面底部的洞察条由<b>你的组合算出来的数据</b>触发——换了权重，浮出来的提醒也会变。</p>"
-        f'<p class="note">所有口径（复权方式、再平衡假设、无风险利率取值、缺失值处理）都在'
-        f'<a href="{root}about.html">口径页</a>。</p>'
+def render_preset_page(result: Mapping[str, Any], *, root: str = "") -> str:
+    return _page(
+        f"{result['name']} · ETF 组合数值实验室",
+        render_dashboard(result),
+        root=root,
+        data_version=str(result.get("data_version", "—")),
     )
+
+
+def _gear_css(count: int) -> str:
+    """档位切换所需的 :checked 规则（数量随组合数变化，因此动态生成）。"""
+    rules = []
+    for index in range(count):
+        rules.append(f'#gear{index}:checked ~ .gear-panes > #pane{index} {{ display:block; }}')
+        rules.append(
+            f'#gear{index}:checked ~ .gear-labels label[for="gear{index}"]'
+            " { background:var(--accent); color:#0b0e13; border-color:var(--accent); }"
+        )
+    return "<style>" + "".join(rules) + "</style>"
+
+
+def render_index(results: Sequence[Mapping[str, Any]], *, counts: Mapping[str, int], data_version: str, root: str = "") -> str:
+    """首屏：**一进来就是数据**。档位切换预先把每个组合的仪表盘都渲染进同一页，
+    纯 CSS 切换，因此切组合不刷新、不跳页。"""
+    inputs = "".join(
+        f'<input class="gear-input" type="radio" name="gear" id="gear{i}"{" checked" if i == 0 else ""}>'
+        for i in range(len(results))
+    )
+    labels = "".join(
+        f'<label for="gear{i}">{theme.esc(r.get("name", r.get("key")))}</label>' for i, r in enumerate(results)
+    )
+    custom = (
+        '<details class="gear-custom"><summary>自定义组合 →</summary>'
+        '<div class="card" style="margin-top:8px">'
+        "<p>自定义权重要实时重算，属于<b>实算应用</b>（路线 C）。本地启动：</p>"
+        '<div class="formula">python -m etf_lab.cli app</div>'
+        '<p>然后打开 <code>http://127.0.0.1:8080/lab</code> 拖动权重。<br>'
+        "静态页只做预计算——这样它零服务器、离线可用、也永远不会挂。</p>"
+        "</div></details>"
+    )
+    panes = "".join(
+        f'<section class="gear-pane" id="pane{i}">{render_dashboard(r)}</section>' for i, r in enumerate(results)
+    )
+    counts_rows = "".join(f"<tr><td>{theme.esc(k)}</td><td>{v:,}</td></tr>" for k, v in counts.items() if v)
     body = f"""
-<div class="titlebar">
-  <div>
-    <h1>组合工作台</h1>
-    <div class="q">默认示例组合的横截面：指标、风险贡献、归因、洞察。点数字旁的 ◂ 才展开公式。</div>
-  </div>
-  <div class="sub">数据版本 <code>{theme.esc(data_version)}</code></div>
+{_gear_css(len(results))}
+<div class="gear-wrap">
+  {inputs}
+  <div class="gear-labels">{labels}{custom}</div>
+  <div class="gear-panes">{panes}</div>
 </div>
-
-{theme.panel("示例组合对比", "<table><thead><tr><th>组合</th><th>起始</th><th>年化</th><th>波动</th><th>夏普</th><th>最大回撤</th><th>VaR95</th></tr></thead><tbody>" + rows + "</tbody></table>", span=12)}
-
 <div class="grid" style="margin-top:12px">
-  {theme.panel("数据底座", "<table><thead><tr><th>表</th><th>行数</th></tr></thead><tbody>" + counts_rows + "</tbody></table>", span=6)}
-  {theme.panel("这个站怎么读", how_to_panel, span=6)}
+  {theme.panel("数据底座", "<table><thead><tr><th>表</th><th>行数</th></tr></thead><tbody>" + counts_rows + "</tbody></table>"
+    + f"<p class='note'>数据版本 <code>{theme.esc(data_version)}</code>。行情来自公开接口，数据不随仓库分发。</p>", span=6)}
+  {theme.panel("怎么读这个站", '''<p class="note">上面每一格数字里都有 <span class="hintmark">◂</span>，点开才是公式与「什么时候会骗人」。默认视图不放讲解。</p>
+  <p class="note">页面里的<b>洞察条</b>不是写好的文案，而是规则引擎读你这份组合算出来的数字后浮出来的——
+  换个组合，浮出来的提醒就变了。配出特定结构（含跨境、含债券、带对冲）还会解锁对应模块。</p>''', span=6)}
 </div>
 """
     return _page("ETF 组合数值实验室 · 组合工作台", body, root=root, data_version=data_version)
@@ -632,27 +695,17 @@ def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_an
     _copy_plotly_js(out)
     (out / "assets" / "style.css").write_text(theme.STYLE, encoding="utf-8")
 
-    meta: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     failures: list[str] = []
     for spec in PRESETS:
         try:
             result = compute_preset(con, spec, rf_annual=rf_annual)
             (out / f"{spec.key}.html").write_text(render_preset_page(result, root=""), encoding="utf-8")
-            meta.append(
-                {
-                    "key": spec.key,
-                    "name": spec.name,
-                    "question": spec.question,
-                    "start": result["start"],
-                    "end": result["end"],
-                    "metrics": result["metrics"],
-                }
-            )
+            results.append(result)
         except Exception as exc:  # noqa: BLE001 - 单个组合作不出来不应让整站失败
             failures.append(f"{spec.key}: {type(exc).__name__}: {exc}")
-            meta.append({"key": spec.key, "name": spec.name, "question": spec.question, "error": str(exc)})
 
-    (out / "index.html").write_text(render_index(meta, counts=counts, data_version=data_version), encoding="utf-8")
+    (out / "index.html").write_text(render_index(results, counts=counts, data_version=data_version), encoding="utf-8")
     (out / "concepts.html").write_text(render_concepts(), encoding="utf-8")
     (out / "about.html").write_text(render_about(counts=counts, data_version=data_version), encoding="utf-8")
     (out / ".nojekyll").write_text("", encoding="utf-8")

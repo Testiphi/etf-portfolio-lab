@@ -25,11 +25,15 @@ HIGH_CORRELATION = 0.90
 DEEP_DRAWDOWN = -0.30
 SLOW_RECOVERY_DAYS = 365
 DCA_ALGORITHM_GAP = 0.01
+ARITHMETIC_GEOMETRIC_GAP = 0.01
+"""算术年化与复合年化之差超过 1 个百分点 → 提示波动拖累。"""
 SMALL_SAMPLE_DAYS = 250
 CONCENTRATION_SHARE = 0.80
 SKEW_THRESHOLD = -0.30
 VAR_METHOD_GAP = 0.20
 """历史法与参数法 VaR 的相对差超过 20% → 提示分布并非正态。"""
+PREMIUM_DISCOUNT_ALERT = 0.01
+"""组合加权折溢价绝对值超过 1% → 提示买贵/买便宜的幅度。"""
 
 
 @dataclass(frozen=True)
@@ -143,7 +147,66 @@ def rule_dca_algorithm_gap(result: Mapping[str, Any]) -> Insight | None:
     )
 
 
+def rule_arithmetic_vs_geometric_gap(result: Mapping[str, Any]) -> Insight | None:
+    """算术平均年化与复合年化的差距 = 波动拖累。
+
+    这是最普遍的收益认知偏差：宣传口径常用算术平均，而投资者实际拿到的是复合收益。
+    """
+    arithmetic = _f(result, "metrics", "arithmetic_annualized_return")
+    geometric = _f(result, "metrics", "annualized_return")
+    drag = _f(result, "metrics", "volatility_drag")
+    if arithmetic is None or geometric is None or drag is None:
+        return None
+    if abs(float(drag)) < ARITHMETIC_GEOMETRIC_GAP:
+        return None
+    vol = _f(result, "metrics", "annualized_volatility")
+    theory = (float(vol) ** 2 / 2) if vol is not None else None
+    extra = f"，理论近似 σ²/2 = {theory:.2%}" if theory is not None else ""
+    return Insight(
+        key="arithmetic_geometric_gap",
+        level="info",
+        title=(
+            f"算术平均年化 {float(arithmetic):.2%} 比复合年化 {float(geometric):.2%} "
+            f"高出 {float(drag):.2%}{extra}——这就是波动拖累"
+        ),
+        card="arithmetic_vs_geometric",
+        evidence={"arithmetic": arithmetic, "geometric": geometric, "drag": drag, "sigma_squared_over_2": theory},
+    )
+
+
+def rule_premium_discount(result: Mapping[str, Any]) -> Insight | None:
+    """组合加权折溢价——买入时多付/少付了多少钱。"""
+    block = _f(result, "premium_discount") or {}
+    latest = block.get("weighted_latest")
+    if latest is None or abs(float(latest)) < PREMIUM_DISCOUNT_ALERT:
+        return None
+    direction = "溢价" if float(latest) > 0 else "折价"
+    action = "买入即多付" if float(latest) > 0 else "买入即少付"
+    worst = block.get("max_abs_symbol")
+    extra = ""
+    if worst:
+        per = (block.get("per_symbol") or {}).get(worst) or {}
+        if per.get("latest") is not None:
+            extra = f"；{worst} 单只 {float(per['latest']):.2%}"
+    # 跨境 ETF 的 QDII 净值披露有滞后（反映上一交易日境外收盘），
+    # 直接把它当"多付了多少钱"会高估——必须在这条提醒里说清楚。
+    has_cross_border = bool((_f(result, "composition") or {}).get("has_cross_border"))
+    caveat = "（含跨境 ETF：其净值披露有时滞，估算偏高）" if has_cross_border else ""
+    return Insight(
+        key="premium_discount",
+        level="warn" if float(latest) > 0 else "info",
+        title=f"组合加权{direction} {float(latest):.2%}（{action}）{extra}{caveat}",
+        card="premium_discount",
+        evidence={
+            "weighted_latest": latest,
+            "cross_border_timing_lag": has_cross_border,
+            **{k: v for k, v in block.items() if k not in ("per_symbol",)},
+        },
+    )
+
+
 def rule_small_sample(result: Mapping[str, Any]) -> Insight | None:
+    """样本少于一年时提示估计不稳定。"""
     n_obs = _f(result, "n_obs")
     if n_obs is None or int(n_obs) >= SMALL_SAMPLE_DAYS:
         return None
@@ -314,9 +377,11 @@ RULES: tuple[Callable[[Mapping[str, Any]], Insight | None], ...] = (
     rule_high_correlation,
     rule_slow_drawdown_recovery,
     rule_dca_algorithm_gap,
+    rule_premium_discount,
     rule_return_concentration,
     rule_var_method_divergence,
     rule_left_tail,
+    rule_arithmetic_vs_geometric_gap,
     rule_adjustment_events,
     rule_small_sample,
 )

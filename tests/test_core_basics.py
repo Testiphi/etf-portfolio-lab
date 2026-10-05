@@ -163,6 +163,38 @@ def test_sharpe_uses_supplied_risk_free_rate() -> None:
     assert with_rf < without_rf
 
 
+def test_volatility_drag_hand_computed() -> None:
+    """一年两期：+50% 与 −50%。
+
+    - 算术平均年化 = 均值 × 2 = 0%
+    - 复合（真实）年化 = 1.5 × 0.5 − 1 = −25%
+    - 两者相差 25 个百分点，这就是波动拖累——宣传口径用算术平均时会凭空多出 25pp。
+    """
+    rets = pd.Series([0.5, -0.5], index=_daily_index(2))
+    assert metrics.arithmetic_annualized_return(rets, periods_per_year=2) == pytest.approx(0.0)
+    assert metrics.annualized_return_from_returns(rets, periods_per_year=2) == pytest.approx(-0.25)
+    assert metrics.volatility_drag(rets, periods_per_year=2) == pytest.approx(0.25)
+
+
+def test_volatility_drag_can_be_negative_for_steady_returns() -> None:
+    """恒定正收益时复合年化反而高于「均值 × 期数」。
+
+    说明 σ²/2 只是**小收益**下的近似，不能当成恒等式——这条测试用来防止
+    有人把波动拖累写成"永远为正"。
+    """
+    rets = pd.Series([0.10, 0.10], index=_daily_index(2))
+    assert metrics.arithmetic_annualized_return(rets, periods_per_year=2) == pytest.approx(0.20)
+    assert metrics.annualized_return_from_returns(rets, periods_per_year=2) == pytest.approx(0.21)
+    assert metrics.volatility_drag(rets, periods_per_year=2) == pytest.approx(-0.01)
+
+
+def test_summary_includes_arithmetic_and_drag() -> None:
+    nav = pd.Series([1.0, 1.1, 0.99, 1.2], index=_daily_index(4))
+    out = metrics.summary(nav)
+    assert "arithmetic_annualized_return" in out
+    assert "volatility_drag" in out
+
+
 def test_summary_rejects_multi_asset_returns() -> None:
     """把多资产面板当组合收益传进来，是最容易犯的量纲错误，必须显式拒绝。"""
     nav = pd.Series([1.0, 1.1, 0.99, 1.2], index=_daily_index(4))

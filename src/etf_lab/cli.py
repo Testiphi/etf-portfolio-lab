@@ -42,6 +42,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if args.preset in ("core", "all"):
         reports += fetch.fetch_etf_prices(con, start=args.start, verify=not args.no_verify)
         reports += fetch.fetch_index_prices(con, start=args.start)
+    if args.preset in ("nav", "all"):
+        # 净值只用于折溢价，不参与收益计算；服务端每页仅 20 条，窗口不宜过大
+        reports += fetch.fetch_fund_nav(con, start=args.nav_start)
     if args.preset in ("macro", "all"):
         for pending in fetch.PENDING_SOURCES:
             print(f"[待接入] {pending}")
@@ -93,8 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_probe.set_defaults(func=cmd_probe)
 
     p_fetch = sub.add_parser("fetch", help="采集数据到本地 DuckDB")
-    p_fetch.add_argument("--preset", choices=["core", "macro", "all"], default="core")
+    p_fetch.add_argument("--preset", choices=["core", "nav", "macro", "all"], default="core")
     p_fetch.add_argument("--start", default="2012-01-01")
+    p_fetch.add_argument("--nav-start", default="2022-01-01", help="净值抓取起点（净值仅用于折溢价）")
     p_fetch.add_argument("--db", default=None)
     p_fetch.add_argument("--no-verify", action="store_true", help="跳过与校验源的收盘价交叉校验（不建议）")
     p_fetch.set_defaults(func=cmd_fetch)

@@ -153,12 +153,46 @@ def read_etf_meta(con: duckdb.DuckDBPyConnection, symbols: Iterable[str]) -> pd.
     return con.execute(sql, codes).df()
 
 
+def read_nav_panel(
+    con: duckdb.DuckDBPyConnection,
+    symbols: Iterable[str],
+    start: str | dt.date | None = None,
+    end: str | dt.date | None = None,
+) -> pd.DataFrame:
+    """读取**单位净值**面板（行=日期，列=代码）。
+
+    折溢价率必须用未复权市场价与单位净值比较——前复权价已被分红调整过，
+    拿它算折溢价会把历史分红误算成折价。
+    """
+    codes = list(symbols)
+    if not codes:
+        raise ValueError("symbols 不能为空")
+    clauses = [f"symbol IN ({', '.join(['?'] * len(codes))})"]
+    params: list[object] = list(codes)
+    if start is not None:
+        clauses.append("date >= ?")
+        params.append(pd.Timestamp(start).date())
+    if end is not None:
+        clauses.append("date <= ?")
+        params.append(pd.Timestamp(end).date())
+
+    sql = f"SELECT symbol, date, nav FROM fund_nav WHERE {' AND '.join(clauses)}"
+    frame = con.execute(sql, params).df()
+    if frame.empty:
+        return pd.DataFrame()
+    panel = frame.pivot(index="date", columns="symbol", values="nav").sort_index()
+    panel.index = pd.to_datetime(panel.index)
+    panel.index.name = "date"
+    return panel
+
+
 def table_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
     """各表行数——用于页面上的"数据底座"展示与断供排查。"""
     tables = [
         "etf_meta",
         "etf_price",
         "index_price",
+        "fund_nav",
         "fx_rate",
         "bond_yield",
         "future_daily",

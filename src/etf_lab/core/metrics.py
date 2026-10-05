@@ -105,6 +105,34 @@ def annualized_return_from_returns(returns: pd.Series, periods_per_year: int = T
 # --------------------------------------------------------------------------- #
 # 风险调整后收益
 # --------------------------------------------------------------------------- #
+def arithmetic_annualized_return(returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+    """算术平均年化：``日收益均值 × 252``。
+
+    Caveats
+    -------
+    它**不是**你实际拿到的年化收益。算术平均忽略复利与波动，
+    在波动存在时系统性高于几何年化，差额近似为 ``σ²/2``（波动拖累）。
+    基金宣传页上那个"平均年化收益"常常就是它——这正是本站要纠正的认知偏差之一。
+    """
+    clean = returns.dropna()
+    if clean.empty:
+        return float("nan")
+    return float(clean.mean() * periods_per_year)
+
+
+def volatility_drag(returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+    """波动拖累：``算术年化 − 几何年化``，理论上近似 ``σ²/2``。
+
+    这是"为什么波动会吃掉长期收益"的直接度量。波动越大，两者差距越大——
+    所以拿算术平均去估算长期复利，会系统性地高估。
+    """
+    arithmetic = arithmetic_annualized_return(returns, periods_per_year)
+    geometric = annualized_return_from_returns(returns, periods_per_year)
+    if not np.isfinite(arithmetic) or not np.isfinite(geometric):
+        return float("nan")
+    return float(arithmetic - geometric)
+
+
 def sharpe_ratio(
     returns: pd.Series,
     rf_annual: float = 0.0,
@@ -353,6 +381,8 @@ def summary(
         "total_return": total_return(nav),
         "annualized_return": annualized_return(nav),
         "annualized_volatility": annualized_volatility(returns, periods_per_year),
+        "arithmetic_annualized_return": arithmetic_annualized_return(returns, periods_per_year),
+        "volatility_drag": volatility_drag(returns, periods_per_year),
         "sharpe": sharpe_ratio(returns, rf_annual=rf_annual, periods_per_year=periods_per_year),
         "sortino": sortino_ratio(returns, rf_annual=rf_annual, periods_per_year=periods_per_year),
         "calmar": calmar_ratio(nav),
