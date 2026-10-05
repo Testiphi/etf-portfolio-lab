@@ -27,7 +27,7 @@ import pandas as pd
 from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.content.episodes import EPISODES
-from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, metrics, returns, simulate as simulate_mod
+from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, metrics, rates as rates_mod, returns, simulate as simulate_mod
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
@@ -300,6 +300,135 @@ def _monte_carlo_tables(result: Mapping[str, Any]) -> str:
     )
 
 
+def _rates_block(
+    curve: pd.DataFrame | None,
+    env: Any,
+    aligned: pd.DataFrame,
+    weights: Mapping[str, float],
+    name_by_symbol: Mapping[str, str],
+) -> dict[str, Any]:
+    """利率环境 + 各标的久期估计 + 利率冲击情景。
+
+    **只有 R² 达标的标的才进入情景表**。实测沪深300ETF 的"久期"是 −9.57 年、
+    黄金 ETF 是 +4.50 年，但两者的 R² 都只有 0.01~0.02——它们根本不是被利率驱动的。
+    把这种数字放进情景表，就是把噪声当结论。
+    """
+    environment = env.as_dict()
+    if curve is None or curve.empty:
+        return {"available": False, "environment": environment, "estimates": [], "scenarios": []}
+
+    history = {}
+    for code in ("CN1Y", "CN10Y"):
+        subset = curve[curve["code"] == code].sort_values("date")
+        if subset.empty:
+            continue
+        series = subset.set_index("date")["yield"]
+        history[code] = _series_to_pairs(series, step=21)
+
+    estimates: list[dict[str, Any]] = []
+    for symbol in aligned.columns:
+        estimate = rates_mod.estimate_duration(symbol, aligned[symbol].pct_change().dropna(), curve)
+        if estimate is None:
+            continue
+        row = estimate.as_dict()
+        row["name"] = name_by_symbol.get(symbol, symbol)
+        estimates.append(row)
+
+    reliable = {row["symbol"]: float(row["duration"]) for row in estimates if row["reliable"]}
+    scenarios = rates_mod.rate_scenarios(reliable, weights) if reliable else []
+    translated = [
+        {
+            **{k: v for k, v in row.items() if k != "per_holding"},
+            "per_holding": {name_by_symbol.get(k, k): v for k, v in row["per_holding"].items()},
+        }
+        for row in scenarios
+    ]
+    return {
+        "available": True,
+        "environment": environment,
+        "history": history,
+        "estimates": estimates,
+        "scenarios": translated,
+        "reliable_symbols": sorted(reliable),
+        "bond_weight": round(float(sum(weights.get(s, 0.0) for s in reliable)), 6),
+        "note": (
+            "久期用「该标的的日收益对收益率变动的回归」反推（ΔP/P ≈ −D·Δy）；"
+            "只有 R² ≥ 0.2 的标的进入情景表，其余列入估计表但标注为无参考价值。"
+            "未建模的资产（股票、商品等）的利率敏感性不计入冲击。"
+        ),
+    }
+
+
+def _rates_tables(result: Mapping[str, Any]) -> str:
+    block = result.get("rates") or {}
+    env = block.get("environment") or {}
+    if not block.get("available"):
+        return "<p class='note'>本地没有收益率曲线数据，无风险利率退回假设值。运行 <code>etf-lab fetch --preset macro</code> 可补齐。</p>"
+
+    source_label = "国债收益率曲线" if env.get("source") == "curve" else "兜底假设值"
+    curve_rows = ""
+    for code, value in sorted((env.get("curve") or {}).items(), key=lambda kv: kv[0]):
+        previous = (env.get("curve_last_year") or {}).get(code)
+        # 收益率以小数存放，变动用基点展示更直观
+        change = "—" if previous is None else f"{(value - previous) * 10000:+.0f} bp"
+        curve_rows += f"<tr><td>{theme.esc(code)}</td><td>{theme.pct(value)}</td><td>{change}</td></tr>"
+    environment_html = (
+        f'<p class="note">数据截止 {theme.esc(env.get("as_of"))}，无风险利率取 '
+        f'<b>{theme.esc(env.get("tenor_used"))} = {theme.pct(env.get("risk_free"))}</b>（来源：{source_label}）。'
+        "它直接影响夏普、索提诺与卡玛——此前页面写死 2%，那是把假设当成了事实。</p>"
+        "<table><thead><tr><th>期限</th><th>当前</th><th>较一年前</th></tr></thead>"
+        f"<tbody>{curve_rows}</tbody></table>"
+    )
+    slope = env.get("slope_10y_1y")
+    if slope is not None:
+        environment_html += (
+            f'<p class="note">10 年 − 1 年期限利差 {slope * 10000:+.0f} bp，'
+            f'曲线{"正常向上倾斜" if slope > 0 else "倒挂（短端高于长端）"}。</p>'
+        )
+    return environment_html
+
+
+def _duration_tables(result: Mapping[str, Any]) -> str:
+    block = result.get("rates") or {}
+    estimates = block.get("estimates") or []
+    scenarios = block.get("scenarios") or []
+    if not estimates:
+        return "<p class='note'>没有可用于久期估计的标的。</p>"
+
+    estimate_rows = ""
+    for row in estimates:
+        flag = "" if row.get("reliable") else " <span class='badge pending'>不可靠</span>"
+        estimate_rows += (
+            f'<tr><td>{theme.esc(row["name"])}</td><td>{row["duration"]:+.2f}</td>'
+            f'<td>{theme.esc(row["code"])}</td><td>{theme.num(row["r_squared"], 3)}</td>'
+            f'<td>{row["n_obs"]}</td><td class="note">{theme.esc(row.get("warning") or "")}{flag}</td></tr>'
+        )
+    estimate_html = (
+        "<table><thead><tr><th>标的</th><th>估计久期（年）</th><th>对哪条曲线</th><th>R²</th><th>样本</th><th>说明</th></tr></thead>"
+        f"<tbody>{estimate_rows}</tbody></table>"
+    )
+
+    if not scenarios:
+        return estimate_html + "<p class='note'>没有 R² 达标的标的，因此不给利率冲击情景——把噪声当结论比不给数字更糟。</p>"
+
+    scenario_rows = ""
+    for row in scenarios:
+        sleeve = "—" if row.get("bond_sleeve_impact") is None else theme.pct(row["bond_sleeve_impact"])
+        scenario_rows += (
+            f'<tr><td>{row["shock_bp"]:+.0f} bp</td>'
+            f'<td class="{"warn" if row["portfolio_impact"] < 0 else "ok"}">{theme.pct(row["portfolio_impact"])}</td>'
+            f'<td>{sleeve}</td></tr>'
+        )
+    scenario_html = (
+        f'<p class="note">债券腿权重合计 {theme.pct(block.get("bond_weight"))}；'
+        "组合影响 = Σ（权重 × 久期 × 冲击）。「债券腿自身」= 组合影响 ÷ 债券权重，"
+        "即那条腿单独会跌多少。</p>"
+        "<table><thead><tr><th>收益率平行移动</th><th>组合影响</th><th>债券腿自身</th></tr></thead>"
+        f"<tbody>{scenario_rows}</tbody></table>"
+    )
+    return estimate_html + scenario_html + f'<p class="note">{theme.esc(block.get("note", ""))}</p>'
+
+
 def _derivatives_block(nav: pd.Series, aligned: pd.DataFrame, rf_annual: float) -> dict[str, Any]:
     """波动率期限结构 + 保护成本表（买保险要花多少钱）。
 
@@ -492,6 +621,10 @@ def _rolling_sharpe(nav: pd.Series, rf_annual: float, window: int = ROLLING_WIND
     rets = nav.pct_change().dropna()
     if len(rets) < window + 20:
         return pd.Series(dtype=float)
+    # 防御：1 + r < 0 时分数次幂会给出复数，随后被静默截断成实数。
+    # 正常情况下不会遇到（无风险利率是小数），但真出现过一次，所以显式挡住。
+    if 1.0 + rf_annual <= 0:
+        return pd.Series(dtype=float)
     rf_period = (1.0 + rf_annual) ** (1.0 / 252) - 1.0
     excess = rets - rf_period
     mean = excess.rolling(window).mean()
@@ -502,10 +635,14 @@ def _rolling_sharpe(nav: pd.Series, rf_annual: float, window: int = ROLLING_WIND
 def compute_preset(
     con,
     spec: PortfolioSpec,
-    rf_annual: float = RF_ANNUAL_DEFAULT,
+    rf_annual: float | None = None,
     start: str | None = None,
 ) -> dict[str, Any]:
-    """算一个组合的全部展示数据（纯数据，不含任何渲染）。"""
+    """算一个组合的全部展示数据（纯数据，不含任何渲染）。
+
+    ``rf_annual=None`` 表示**从收益率曲线自动取无风险利率**；取不到时才退回
+    ``RF_ANNUAL_DEFAULT`` 假设值，并在结果里标明来源是曲线还是假设。
+    """
     symbols = list(spec.weights)
     panel = repo.read_price_panel(con, symbols, start=start, field="close_adj")
     if panel.empty:
@@ -526,6 +663,14 @@ def compute_preset(
     nav = returns.nav_from_prices(aligned, weights=spec.weights)
     drawdown = metrics.drawdown_series(nav)
     rets = returns.to_returns(aligned, method="simple")
+
+    # 无风险利率优先取真实国债收益率曲线；没有曲线数据时才退回假设值
+    try:
+        curve = repo.read_bond_yield(con)
+    except Exception:  # noqa: BLE001 - 缺曲线不应影响其它面板
+        curve = None
+    rate_env = rates_mod.rate_environment(curve, fallback=RF_ANNUAL_DEFAULT)
+    rf_used = float(rf_annual) if rf_annual is not None else rate_env.risk_free
     # 组合层面的指标必须用**单列**的组合收益；rets 是多资产面板，只用于相关性与分解
     port_rets = nav.pct_change().dropna()
     port_rets.name = "portfolio"
@@ -564,8 +709,9 @@ def compute_preset(
 
     premium = _premium_block(con, symbols, spec.weights, start)
     exposure_block = _exposure_block(con, aligned, spec.weights, start, name_by_symbol)
-    derivatives_block = _derivatives_block(nav, aligned, rf_annual)
-    monte_carlo_block = _monte_carlo_block(nav, rf_annual)
+    derivatives_block = _derivatives_block(nav, aligned, rf_used)
+    monte_carlo_block = _monte_carlo_block(nav, rf_used)
+    rates_block = _rates_block(curve, rate_env, aligned, spec.weights, name_by_symbol)
 
     # 历史情节重放：基准指数可回溯到 2005 年，组合净值则受成分标的上市时间限制
     try:
@@ -611,7 +757,7 @@ def compute_preset(
         except Exception as exc:  # noqa: BLE001 - 单个模式失败不应让整页打不开
             dca_runs[mode] = {"error": f"{type(exc).__name__}: {exc}"}
 
-    rolling = _rolling_sharpe(nav, rf_annual)
+    rolling = _rolling_sharpe(nav, rf_used)
 
     return {
         "key": spec.key,
@@ -624,7 +770,9 @@ def compute_preset(
         "end": str(aligned.index[-1].date()),
         "n_obs": int(len(aligned)),
         "data_version": repo.latest_data_version(con),
-        "rf_annual": rf_annual,
+        "rf_annual": rf_used,
+        "rf_source": rate_env.source,
+        "rf_tenor": rate_env.tenor_used,
         "nav": _series_to_pairs(nav, step=3, keep_extremes=True),
         "drawdown": _series_to_pairs(drawdown, step=3, keep_extremes=True),
         "rolling_sharpe": _series_to_pairs(rolling, step=5),
@@ -634,7 +782,7 @@ def compute_preset(
         },
         "metrics": {
             k: (None if isinstance(v, float) and not np.isfinite(v) else v)
-            for k, v in metrics.summary(nav, port_rets, rf_annual=rf_annual).items()
+            for k, v in metrics.summary(nav, port_rets, rf_annual=rf_used).items()
         },
         "time_weighted_annualized": round(metrics.annualized_return(nav), 6),
         "top_drawdowns": [
@@ -656,6 +804,7 @@ def compute_preset(
         "exposure": exposure_block,
         "derivatives": derivatives_block,
         "monte_carlo": monte_carlo_block,
+        "rates": rates_block,
         "episodes": episode_block,
         "diagnostics": diagnostics,
         "max_drawdown_info": {
@@ -851,6 +1000,25 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     ``figs`` 收集各图的 data/layout，由调用方写进独立的 ``data/*.figs.js``。
     """
     weights_chips = " · ".join(f"{theme.esc(s)} {w:.0%}" for s, w in result["weights"].items())
+
+    # 条件渲染：面板与图表数据必须**同时**出现或同时缺席，
+    # 否则会出现"有容器没数据"或"有数据没容器"（后者会让 id 对齐测试失败，前者是空白图）。
+    rates_data = result.get("rates") or {}
+    rate_panels = ""
+    if rates_data.get("available"):
+        rate_panels = (
+            theme.panel("利率环境与无风险利率", _rates_tables(result), span=4)
+            + theme.panel("国债收益率曲线", theme.figure_div(figures.fig_yield_curve(result), f"{prefix}fig-ycurve", figs), span=4)
+            + theme.panel("国债收益率历史", theme.figure_div(figures.fig_yield_history(result), f"{prefix}fig-yhist", figs), span=4)
+        )
+    duration_panel = ""
+    if (result.get("composition") or {}).get("has_bond") and rates_data.get("scenarios"):
+        duration_panel = theme.panel(
+            "久期与利率冲击",
+            theme.figure_div(figures.fig_rate_scenarios(result), f"{prefix}fig-scen", figs) + _duration_tables(result),
+            span=12,
+        )
+
     return f"""
 <div class="titlebar">
   <div>
@@ -885,6 +1053,8 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
   {theme.panel("各标的年化 vs 最大回撤", theme.figure_div(figures.fig_per_asset(result), f"{prefix}fig-asset", figs), span=4)}
   {theme.panel("因子敞口矩阵（热力图）", theme.figure_div(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo", figs), span=12)}
   {theme.panel("敞口明细与拟合质量", _exposure_table(result), span=12)}
+  {rate_panels}
+  {duration_panel}
   {theme.panel("波动率期限结构", theme.figure_div(figures.fig_vol_term_structure(result), f"{prefix}fig-vol", figs)
     + "<p class='note'>不同回看窗口下的<b>历史</b>波动率。它不是隐含波动率——"
     + "隐含波动率是市场对<b>未来</b>波动的定价，恐慌时会显著高于历史波动率，"
@@ -1076,7 +1246,7 @@ def export_preset_prices(con, out_dir: Path) -> Path | None:
     return target
 
 
-def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_annual: float = RF_ANNUAL_DEFAULT) -> Path:
+def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_annual: float | None = None) -> Path:
     """生成整站，返回输出目录。"""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

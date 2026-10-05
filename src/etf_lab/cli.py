@@ -46,6 +46,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         # 净值只用于折溢价，不参与收益计算；服务端每页仅 20 条，窗口不宜过大
         reports += fetch.fetch_fund_nav(con, start=args.nav_start)
     if args.preset in ("macro", "all"):
+        reports += fetch.fetch_bond_yields(con, start=args.start)
         for pending in fetch.PENDING_SOURCES:
             print(f"[待接入] {pending}")
 

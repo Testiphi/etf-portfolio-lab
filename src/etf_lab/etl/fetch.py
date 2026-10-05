@@ -329,10 +329,46 @@ def fetch_fund_nav(
 
 
 # --------------------------------------------------------------------------- #
+# 国债收益率曲线
+# --------------------------------------------------------------------------- #
+def fetch_bond_yields(
+    con,
+    start: str | dt.date = "2015-01-01",
+    end: str | dt.date | None = None,
+) -> list[FetchReport]:
+    """抓取国债收益率曲线，写入 ``bond_yield``。
+
+    它的用途有两个：**无风险利率不再靠假设**（夏普等指标都要减它），
+    以及用"债券 ETF 收益对收益率变动的回归"反推久期。
+    """
+    from etf_lab.etl import bond_yield as bond_yield_client
+
+    try:
+        result = bond_yield_client.fetch_curve(start=start, end=end)
+    except Exception as exc:  # noqa: BLE001
+        return [FetchReport(target="bond_yield", key="curve", ok=False, error=f"{type(exc).__name__}: {exc}")]
+
+    frame = result.frame.copy()
+    rows = repo.upsert(con, "bond_yield", frame, ["date", "code", "tenor", "yield"])
+    codes = sorted(frame["code"].unique())
+    return [
+        FetchReport(
+            target="bond_yield",
+            key="curve",
+            ok=True,
+            name=f"{len(codes)} 个期限：{', '.join(codes)}",
+            rows=rows,
+            start=str(frame["date"].min().date()),
+            end=str(frame["date"].max().date()),
+            source=result.source,
+        )
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # 数据源探针
 # --------------------------------------------------------------------------- #
 PENDING_SOURCES: tuple[str, ...] = (
-    "bond_yield（国债收益率曲线）：尚未接入，需另找公开接口",
     "future_daily（股指期货基差/展期）：尚未接入",
     "option_daily（ETF 期权与隐含波动率）：尚未接入",
     "fx_rate（汇率）：跨境 ETF 的汇率贡献待接入",

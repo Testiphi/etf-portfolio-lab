@@ -187,18 +187,19 @@ def test_premium_discount_silent_when_small() -> None:
     assert not any(i.key == "premium_discount" for i in insights.evaluate(result))
 
 
-def test_implemented_unlocks_must_be_available_without_special_positions() -> None:
-    """当前架构下，已实现模块的面板是**无条件渲染**的，因此它不能要求"必须持有某种头寸"。
+def test_implemented_unlocks_with_position_requirements_render_conditionally() -> None:
+    """已实现模块若要求特定持仓，其面板必须**条件渲染**。
 
-    否则会出现自相矛盾：面板已经显示出来了，解锁清单却写着「🔒 需期权头寸」——
-    本项目真的出现过这个不一致（期权 Greeks 面板已上线，解锁状态却仍是锁定）。
-    要么把面板改成条件渲染，要么把这类模块的 requirement 改成 always。
+    期权面板当初无条件渲染、解锁清单却写「需期权头寸」，就是这条不变量缺失导致的。
+    久期是允许的例外：它要求债券资产，而面板确实按 ``has_bond`` 条件渲染——
+    由 ``tests/test_render_structure.py::test_duration_panel_is_conditional_on_bond_holdings`` 守住。
     """
+    conditionally_rendered = {"duration"}
     for item in insights.UNLOCK_CATALOG:
-        if item["implemented"]:
-            assert item["requirement"] == "always", (
+        if item["implemented"] and item["requirement"] != "always":
+            assert item["key"] in conditionally_rendered, (
                 f"{item['key']} 已实现但要求 {item['requirement']}；"
-                "面板会无条件出现，与解锁状态矛盾"
+                "要么改成 always，要么加入条件渲染白名单并配套条件渲染测试"
             )
 
 

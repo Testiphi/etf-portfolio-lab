@@ -299,8 +299,8 @@ UNLOCK_CATALOG: tuple[dict[str, Any], ...] = (
         "card": "duration",
         "trigger": "组合含债券 ETF",
         "requirement": "bond",
-        "implemented": False,
-        "pending": "需要国债收益率曲线",
+        "implemented": True,
+        "pending": "久期用收益对收益率变动的回归反推；R² 不足的标的会标注为无参考价值",
     },
     {
         "key": "greeks",

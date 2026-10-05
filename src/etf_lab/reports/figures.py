@@ -319,6 +319,93 @@ def fig_mc_convergence(result: dict) -> go.Figure:
     return theme.dark(fig, height=280)
 
 
+TENOR_YEARS: dict[str, float] = {
+    "CN3M": 0.25,
+    "CN6M": 0.5,
+    "CN1Y": 1.0,
+    "CN2Y": 2.0,
+    "CN3Y": 3.0,
+    "CN5Y": 5.0,
+    "CN7Y": 7.0,
+    "CN10Y": 10.0,
+    "CN30Y": 30.0,
+}
+
+
+def fig_yield_curve(result: dict) -> go.Figure:
+    """当前国债收益率曲线 vs 一年前——期限结构一眼可见。"""
+    env = (result.get("rates") or {}).get("environment") or {}
+    curve = env.get("curve") or {}
+    last_year = env.get("curve_last_year") or {}
+    codes = sorted([c for c in curve if c in TENOR_YEARS], key=lambda c: TENOR_YEARS[c])
+    fig = go.Figure()
+    if codes:
+        fig.add_trace(
+            go.Scatter(
+                x=[TENOR_YEARS[c] for c in codes],
+                y=[curve[c] for c in codes],
+                mode="lines+markers",
+                name=f"当前（{env.get('as_of')}）",
+                line={"color": P["accent"], "width": 2.5},
+            )
+        )
+    previous = [c for c in codes if c in last_year]
+    if previous:
+        fig.add_trace(
+            go.Scatter(
+                x=[TENOR_YEARS[c] for c in previous],
+                y=[last_year[c] for c in previous],
+                mode="lines+markers",
+                name="一年前",
+                line={"color": P["muted"], "dash": "dash"},
+            )
+        )
+    fig.update_layout(
+        title="国债收益率曲线",
+        xaxis={"title": "期限（年）", "type": "log"},
+        yaxis={"title": "收益率", "ticksuffix": "%"},
+    )
+    return theme.dark(fig, height=300)
+
+
+def fig_yield_history(result: dict) -> go.Figure:
+    """1 年与 10 年期收益率的历史（月度抽样）。"""
+    history = (result.get("rates") or {}).get("history") or {}
+    fig = go.Figure()
+    for index, (code, pairs) in enumerate(history.items()):
+        if not pairs:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=[row[0] for row in pairs],
+                y=[row[1] for row in pairs],
+                name=code,
+                line={"color": theme.SERIES_COLORS[index % len(theme.SERIES_COLORS)], "width": 2},
+            )
+        )
+    fig.update_layout(title="国债收益率历史", yaxis={"title": "收益率", "ticksuffix": "%"})
+    return theme.dark(fig, height=300)
+
+
+def fig_rate_scenarios(result: dict) -> go.Figure:
+    """利率冲击情景：收益率平行移动时组合受多大影响。"""
+    scenarios = (result.get("rates") or {}).get("scenarios") or []
+    fig = go.Figure()
+    if scenarios:
+        ordered = sorted(scenarios, key=lambda row: row["shock_bp"])
+        fig.add_trace(
+            go.Bar(
+                x=[f"{row['shock_bp']:+.0f}bp" for row in ordered],
+                y=[row["portfolio_impact"] for row in ordered],
+                marker_color=[P["warn"] if row["portfolio_impact"] < 0 else P["ok"] for row in ordered],
+                text=[f"{row['portfolio_impact']:.2%}" for row in ordered],
+                textposition="auto",
+            )
+        )
+    fig.update_layout(title="利率冲击：组合影响", yaxis={"title": "组合净值影响", "tickformat": ".1%"})
+    return theme.dark(fig, height=260)
+
+
 def fig_per_asset(result: dict) -> go.Figure:
     symbols = list(result["per_asset"])
     fig = go.Figure()

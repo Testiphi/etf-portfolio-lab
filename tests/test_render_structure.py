@@ -26,6 +26,8 @@ FIGURE_SUFFIXES = (
     "fig-roll",
     "fig-asset",
     "fig-expo",
+    "fig-ycurve",
+    "fig-yhist",
     "fig-vol",
     "fig-prot",
     "fig-mcfan",
@@ -33,23 +35,53 @@ FIGURE_SUFFIXES = (
     "fig-mcconv",
     "fig-epi",
 )
+"""无论是否持有债券都应出现的图表。"""
+BOND_ONLY_SUFFIXES = ("fig-scen",)
+"""只有组合含债券标的（久期可估）时才出现的图表。"""
+EXPECTED_WITH_BOND = FIGURE_SUFFIXES + BOND_ONLY_SUFFIXES
 
 
 def _seed_db(path: Path) -> None:
-    """造一个最小的可计算数据仓（两只标的、约三年半日线）。"""
+    """造一个最小的可计算数据仓：国债收益率曲线 + 两只标的（一宽基、一债券）。
+
+    债券标的的收益**由收益率变动驱动**（久期 4 年），这样久期回归才有可靠结果，
+    久期面板也才会真正出现——否则测不到那条条件渲染分支。
+    """
     con = repo.connect(path)
     rng = np.random.default_rng(7)
     dates = pd.date_range("2018-01-01", periods=900, freq="B")
 
-    for symbol, drift, vol in (("AAA", 0.0003, 0.010), ("BBB", 0.0001, 0.003)):
-        prices = 1.0 * np.exp(np.cumsum(rng.normal(drift, vol, len(dates))))
+    # 国债收益率曲线用**均值回复**过程（围绕 2.5%，日变动约 3bp）：
+    # 纯随机游走跑 900 天后会漂到负收益率——那在现实中不存在，
+    # 还会让无风险利率变成负数，把被测代码引入不现实的分支。
+    five_year = np.empty(len(dates))
+    five_year[0] = 2.5
+    for index in range(1, len(dates)):
+        five_year[index] = five_year[index - 1] + 0.01 * (2.5 - five_year[index - 1]) + rng.normal(0, 0.03)
+    curve = pd.concat(
+        [
+            pd.DataFrame({"date": dates, "code": "CN5Y", "tenor": "5年", "yield": five_year}),
+            pd.DataFrame({"date": dates, "code": "CN1Y", "tenor": "1年", "yield": five_year - 0.4}),
+            pd.DataFrame({"date": dates, "code": "CN10Y", "tenor": "10年", "yield": five_year + 0.3}),
+        ],
+        ignore_index=True,
+    )
+    repo.upsert(con, "bond_yield", curve, ["date", "code", "tenor", "yield"])
+
+    changes_bp = np.concatenate([[0.0], np.diff(five_year) * 100.0])
+    bbb_returns = -4.0 * changes_bp / 10000.0 + rng.normal(0, 2e-4, len(dates))
+    series = {
+        "AAA": 1.0 * np.exp(np.cumsum(rng.normal(0.0003, 0.010, len(dates)))),
+        "BBB": 100.0 * np.cumprod(1.0 + bbb_returns),
+    }
+    for symbol, prices in series.items():
         frame = pd.DataFrame(
             {
                 "symbol": symbol,
                 "date": dates,
                 "open": prices,
-                "high": prices * 1.01,
-                "low": prices * 0.99,
+                "high": prices * 1.001,
+                "low": prices * 0.999,
                 "close": prices,
                 "volume": 1_000_000.0,
                 "amount": 10_000_000.0,
@@ -122,12 +154,13 @@ def _seed_db(path: Path) -> None:
     con.close()
 
 
-def _spec(key: str) -> PortfolioSpec:
+def _spec(key: str, *, include_bond: bool = True) -> PortfolioSpec:
+    weights = {"AAA": 0.6, "BBB": 0.4} if include_bond else {"AAA": 1.0}
     return PortfolioSpec(
         key=key,
         name=f"组合{key}",
         question="测试用组合",
-        weights={"AAA": 0.6, "BBB": 0.4},
+        weights=weights,
         dca={"amount": 1000.0, "freq": "monthly", "mode": "fixed", "day": None},
     )
 
@@ -149,8 +182,16 @@ def test_compute_preset_runs_end_to_end_on_synthetic_data(tmp_path: Path) -> Non
     assert risk["log_total_return"] == pytest.approx(risk["log_contribution_sum"] + risk["rebalancing_effect"], abs=1e-6)
     # 没有净值数据时折溢价应为空字典，而不是抛错或填 0
     assert result["premium_discount"] == {}
-    # 组合结构识别正确 → 债券类模块应当被触发
+    # 无风险利率来自收益率曲线，而不是写死的假设值
+    assert result["rf_source"] == "curve"
+    # as_dict 会把 rf 舍入到 6 位小数，比较时用相应容差
+    assert result["rf_annual"] == pytest.approx(result["rates"]["environment"]["risk_free"], abs=1e-6)
+    assert 0.0 < result["rf_annual"] < 0.10, "合成曲线是均值回复的，rf 应当落在合理区间"
+    # 组合含债券，久期面板的图与数据必须同时存在
     assert result["composition"]["has_bond"] is True
+    # 只有 R² 达标的标的才进入利率冲击情景
+    assert result["rates"]["reliable_symbols"] == ["BBB"]
+    assert result["rates"]["scenarios"]
 
 
 def test_gear_panes_have_unique_figure_ids(tmp_path: Path) -> None:
@@ -182,15 +223,48 @@ def test_gear_panes_have_unique_figure_ids(tmp_path: Path) -> None:
 
     # 每一档都要各自拥有全套图表容器
     for key in ("one", "two", "three"):
-        for suffix in FIGURE_SUFFIXES:
+        for suffix in EXPECTED_WITH_BOND:
             assert f'id="{key}-{suffix}"' in html, f"缺少 {key}-{suffix}"
 
     # 图表数据必须全部外置到数据文件里（页面本身不再内联 Plotly 数据）
     assert "Plotly.newPlot(" not in html, "页面里不应再内联绘图脚本"
     all_fig_ids = {fid for figs in figs_by_key.values() for fid in figs}
-    assert all_fig_ids == {f"{key}-{suffix}" for key in ("one", "two", "three") for suffix in FIGURE_SUFFIXES}
+    assert all_fig_ids == {f"{key}-{suffix}" for key in ("one", "two", "three") for suffix in EXPECTED_WITH_BOND}
     data_js = theme.figure_data_js(figs_by_key["one"])
     assert '"one-fig-nav"' in data_js
+
+
+def test_duration_panel_is_conditional_on_bond_holdings(tmp_path: Path) -> None:
+    """久期面板与它的图表必须**同时**出现或同时缺席。
+
+    这是条件渲染最容易出的错：面板隐藏了但图表数据还在（或反之）。
+    它也保证解锁语义成立——「利率敏感性与久期」标着需债券资产，就必须真的只在含债券时出现。
+    """
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    with_bond = static_site.compute_preset(con, _spec("with"))
+    without = static_site.compute_preset(con, _spec("without", include_bond=False))
+    con.close()
+
+    assert with_bond["composition"]["has_bond"] is True
+    assert not without["composition"].get("has_bond")
+    assert with_bond["rates"]["scenarios"], "含债券时应当给出利率冲击情景"
+    assert without["rates"]["scenarios"] == [], "不含债券时不应给利率冲击情景"
+
+    figs_with: dict = {}
+    html_with = static_site.render_dashboard(with_bond, prefix="with-", figs=figs_with)
+    figs_without: dict = {}
+    html_without = static_site.render_dashboard(without, prefix="without-", figs=figs_without)
+
+    assert "久期与利率冲击" in html_with
+    assert "with-fig-scen" in figs_with
+    assert "久期与利率冲击" not in html_without
+    assert "with-fig-scen" not in figs_without
+
+    # 利率环境面板与曲线图与持仓无关，只要曲线数据在就应当出现
+    assert "利率环境与无风险利率" in html_without
+    assert "without-fig-ycurve" in figs_without
 
 
 def test_curves_are_downsampled_but_keep_extremes() -> None:

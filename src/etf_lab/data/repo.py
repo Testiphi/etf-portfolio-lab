@@ -186,6 +186,15 @@ def read_nav_panel(
     return panel
 
 
+def read_bond_yield(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """读取国债收益率曲线长表（date / code / tenor / yield）。"""
+    frame = con.execute("SELECT date, code, tenor, yield FROM bond_yield WHERE yield IS NOT NULL ORDER BY date").df()
+    if frame.empty:
+        return pd.DataFrame(columns=["date", "code", "tenor", "yield"])
+    frame["date"] = pd.to_datetime(frame["date"])
+    return frame
+
+
 def table_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
     """各表行数——用于页面上的"数据底座"展示与断供排查。"""
     tables = [
