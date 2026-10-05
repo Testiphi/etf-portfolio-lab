@@ -1,0 +1,51 @@
+[project]
+name = "etf-portfolio-lab"
+version = "0.1.0"
+description = "A股指数ETF组合数值实验室：教学导向的回测、风险敞口、蒙特卡洛与对冲数值工具（教育用途，非投资建议）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Testiphi" }]
+keywords = ["etf", "a-share", "portfolio", "backtest", "monte-carlo", "education"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Education",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.0",
+  "scipy>=1.11",
+  "statsmodels>=0.14",
+  "duckdb>=1.0",
+  "plotly>=5.20",
+  "pyyaml>=6.0",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# akshare 是**可选备用源**：它依赖 py_mini_racer（内含 V8 二进制，杀毒软件常误报甚至
+# 直接杀进程）。主数据路径走 etl/eastmoney.py 的纯 HTTP 实现，默认不需要它。
+data = ["akshare>=1.14"]
+app = ["nicegui>=2.0"]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Homepage = "https://github.com/Testiphi/etf-portfolio-lab"
+
+[project.scripts]
+etf-lab = "etf_lab.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/etf_lab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# ---- 测试与缓存 ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- 数据（绝不入库：体积 + 版权/再分发风险）----
+# 注意用 /data/ 锚定根目录：写成 data/ 会连 docs/data/ 一起忽略掉，
+# 而路线 B 需要那个预烘焙的价格文件。
+/data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+!docs/data/
+!docs/data/*.json
+
+# ---- 密钥与本地配置 ----
+.env
+.env.*
+config/local.yaml
+
+# ---- 运行时产物 ----
+logs/
+*.log
+.cache/
+
+# ---- OS / 编辑器 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

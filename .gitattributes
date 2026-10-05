@@ -1,0 +1,7 @@
+# 统一文本换行，避免 Windows 上的 LF→CRLF 警告刷屏、也避免无意义的整文件 diff
+* text=auto eol=lf
+
+# 生成的静态站与第三方 JS 不做 diff（体积大且非手写）
+docs/assets/plotly.min.js -diff
+*.duckdb binary
+*.parquet binary
