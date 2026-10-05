@@ -507,8 +507,13 @@ def _unlocks_block(result: Mapping[str, Any]) -> str:
     )
 
 
-def render_dashboard(result: Mapping[str, Any]) -> str:
-    """一个组合的完整仪表盘（不含页头页脚），供独立页与首屏档位切换共用。"""
+def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
+    """一个组合的完整仪表盘（不含页头页脚），供独立页与首屏档位切换共用。
+
+    ``prefix`` 会加到每个图表容器的 id 前面。**这是必需的**：首屏把多个组合的仪表盘
+    内联在同一页里，若 id 重复，浏览器 ``getElementById`` 只返回第一个匹配，
+    Plotly 会把所有图都画进第一档的容器，其余档位一片空白——本项目真的踩过这个坑。
+    """
     weights_chips = " · ".join(f"{theme.esc(s)} {w:.0%}" for s, w in result["weights"].items())
     return f"""
 <div class="titlebar">
@@ -522,20 +527,20 @@ def render_dashboard(result: Mapping[str, Any]) -> str:
 {_metrics_keyboard(result)}
 
 <div class="grid" style="margin-top:12px">
-  {theme.panel("净值与水下曲线", theme.figure_html(figures.fig_nav(result), "fig-nav"), span=8)}
-  {theme.panel("收益归因", theme.figure_html(figures.fig_return_contribution(result), "fig-attrib")
+  {theme.panel("净值与水下曲线", theme.figure_html(figures.fig_nav(result), f"{prefix}fig-nav"), span=8)}
+  {theme.panel("收益归因", theme.figure_html(figures.fig_return_contribution(result), f"{prefix}fig-attrib")
     + "<p class='note'>算术贡献各项之和 "
     + theme.pct((result.get('risk_contribution') or {}).get('return_contribution_sum'))
     + " 与复利后的实际累计收益 "
     + theme.pct((result.get('metrics') or {}).get('total_return'))
     + " 之间的差额，就是复利与再平衡效应——归因相加不等于累计收益，这是它的固有难点。</p>", span=4)}
-  {theme.panel("权重 vs 风险贡献", theme.figure_html(figures.fig_risk_vs_weight(result), "fig-risk"), span=6)}
+  {theme.panel("权重 vs 风险贡献", theme.figure_html(figures.fig_risk_vs_weight(result), f"{prefix}fig-risk"), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
-  {theme.panel("定投：市值 vs 累计投入", theme.figure_html(figures.fig_dca(result), "fig-dca"), span=6)}
-  {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), "fig-roll"), span=4)}
+  {theme.panel("定投：市值 vs 累计投入", theme.figure_html(figures.fig_dca(result), f"{prefix}fig-dca"), span=6)}
+  {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), f"{prefix}fig-roll"), span=4)}
   {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
-  {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), "fig-asset"), span=4)}
+  {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), f"{prefix}fig-asset"), span=4)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
   {theme.panel("可解锁模块", _unlocks_block(result), span=12)}
 </div>
@@ -545,7 +550,7 @@ def render_dashboard(result: Mapping[str, Any]) -> str:
 def render_preset_page(result: Mapping[str, Any], *, root: str = "") -> str:
     return _page(
         f"{result['name']} · ETF 组合数值实验室",
-        render_dashboard(result),
+        render_dashboard(result, prefix=f"{result.get('key', 'p')}-"),
         root=root,
         data_version=str(result.get("data_version", "—")),
     )
@@ -583,7 +588,9 @@ def render_index(results: Sequence[Mapping[str, Any]], *, counts: Mapping[str, i
         "</div></details>"
     )
     panes = "".join(
-        f'<section class="gear-pane" id="pane{i}">{render_dashboard(r)}</section>' for i, r in enumerate(results)
+        f'<section class="gear-pane" id="pane{i}">'
+        f'{render_dashboard(r, prefix=str(r.get("key", f"p{i}")) + "-")}</section>'
+        for i, r in enumerate(results)
     )
     counts_rows = "".join(f"<tr><td>{theme.esc(k)}</td><td>{v:,}</td></tr>" for k, v in counts.items() if v)
     body = f"""
