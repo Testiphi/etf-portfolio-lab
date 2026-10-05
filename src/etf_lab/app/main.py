@@ -28,16 +28,17 @@ from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.data import repo
 from etf_lab.presets import PRESETS, PRESETS_BY_KEY
-from etf_lab.reports import static_site
+from etf_lab.reports import figures, insights as insights_mod, theme
 from etf_lab.services.jobs import compute_custom_job, compute_preset_job
 from etf_lab.services.pool import run_heavy
 
 CSS = """
 body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
-.metric-card { min-width: 150px; }
-.formula { font-family: ui-monospace, Consolas, monospace; background:#f5f5f5; padding:4px 8px; border-radius:6px; }
-.warn { color:#b91c1c; }
-.muted { color:#6b7280; font-size:13px; }
+.metric-card { min-width: 150px; background:#151a22; border:1px solid #252c3a; }
+.formula { font-family: ui-monospace, Consolas, monospace; background:#0e1116; border:1px solid #252c3a;
+  color:#e8c07d; padding:5px 8px; border-radius:6px; font-size:12px; }
+.warn { color:#ff7a59; }
+.muted { color:#8b95a7; font-size:13px; }
 """
 
 # 进程内缓存：key = f"{spec_key}|{data_version}"。小站点上这就够用；
@@ -173,7 +174,7 @@ def _render_result(result: dict[str, Any]) -> None:
         tab_assets = ui.tab("各标的表现")
     with ui.tab_panels(tabs, value=tab_nav).classes("w-full"):
         with ui.tab_panel(tab_nav):
-            ui.plotly(static_site.fig_nav(result)).classes("w-full")
+            ui.plotly(figures.fig_nav(result)).classes("w-full")
             ui.label("只报一个最大回撤会掩盖路径差异：跌得快恢复快与阴跌两年是完全不同的体验。").classes("muted")
             ui.table(
                 columns=[
@@ -196,13 +197,13 @@ def _render_result(result: dict[str, Any]) -> None:
                 row_key="peak",
             ).classes("w-full")
         with ui.tab_panel(tab_dca):
-            ui.plotly(static_site.fig_dca(result)).classes("w-full")
+            ui.plotly(figures.fig_dca(result)).classes("w-full")
             _dca_table(result)
         with ui.tab_panel(tab_corr):
-            ui.plotly(static_site.fig_correlation(result)).classes("w-full")
+            ui.plotly(figures.fig_correlation(result)).classes("w-full")
             ui.label("相关性用过去日收益估计；危机时相关性会上升，分散化在最需要它的时候变弱。").classes("muted")
         with ui.tab_panel(tab_assets):
-            ui.plotly(static_site.fig_per_asset(result)).classes("w-full")
+            ui.plotly(figures.fig_per_asset(result)).classes("w-full")
             ui.table(
                 columns=[
                     {"name": "symbol", "label": "标的", "field": "symbol", "align": "left"},
@@ -221,6 +222,58 @@ def _render_result(result: dict[str, Any]) -> None:
                 ],
                 row_key="symbol",
             ).classes("w-full")
+
+    ui.label("洞察（由你的数据触发）").classes("text-xl font-semibold mt-6")
+    _insights_block(result)
+    ui.label("可解锁模块").classes("text-xl font-semibold mt-6")
+    _unlocks_block(result)
+
+
+def _insights_block(result: dict[str, Any]) -> None:
+    """洞察条：由数据触发，点开才展开知识与证据。"""
+    found = insights_mod.evaluate(result)
+    if not found:
+        ui.label("当前数据没有触发任何提醒——没有哪一项越过阈值，这本身也是一个结论。").classes("muted")
+        return
+    for item in found:
+        color = "border-l-4 border-orange-500" if item.level == "warn" else "border-l-4 border-blue-500"
+        with ui.expansion(item.title).classes(f"w-full {color} bg-gray-800"):
+            card = teaching.card(item.card)
+            ui.label(card["title"]).classes("font-semibold")
+            ui.html(f'<div class="formula">{card["formula"]}</div>')
+            ui.label(f"说明什么：{card['means']}")
+            ui.label(f"什么时候会骗人：{card['misleads']}").classes("warn")
+            if item.evidence:
+                ui.table(
+                    columns=[
+                        {"name": "k", "label": "依据", "field": "k", "align": "left"},
+                        {"name": "v", "label": "数值", "field": "v"},
+                    ],
+                    rows=[{"k": k, "v": str(v)} for k, v in item.evidence.items()],
+                ).classes("w-full")
+
+
+def _unlocks_block(result: dict[str, Any]) -> None:
+    """解锁清单：配出对应结构才会出现。"""
+    items = insights_mod.evaluate_unlocks(result.get("composition"))
+    triggered = sum(1 for i in items if i["triggered"])
+    ui.label(f"已触发 {triggered}/{len(items)} 个模块——知识是被你的组合问出来的，不是翻页找到的。").classes("muted")
+    with ui.row().classes("gap-3 flex-wrap"):
+        for item in items:
+            state = "已解锁" if item["triggered"] and item["implemented"] else ("已触发 · 待接入" if item["triggered"] else f"🔒 需{item['requirement_label']}")
+            color = "border-green-500" if item["triggered"] and item["implemented"] else ("border-yellow-500" if item["triggered"] else "border-gray-600")
+            with ui.card().classes(f"w-72 border {color}"):
+                ui.label(f"{item['title']}｜{state}").classes("font-semibold")
+                ui.label(f"触发条件：{item['trigger']}").classes("muted")
+                if item["triggered"] and not item["implemented"]:
+                    ui.label(f"待办：{item['pending']}").classes("warn")
+                if item["triggered"]:
+                    with ui.expansion("先了解这个概念").classes("w-full"):
+                        card = teaching.card(item["card"])
+                        ui.label(card["title"]).classes("font-semibold")
+                        ui.html(f'<div class="formula">{card["formula"]}</div>')
+                        ui.label(card["means"])
+                        ui.label(card["misleads"]).classes("warn")
 
 
 def _concept_cards(keys: list[str]) -> None:
@@ -241,6 +294,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
 
     @ui.page("/")
     def home() -> None:
+        ui.dark_mode().enable()
         ui.label("ETF 组合数值实验室").classes("text-3xl font-bold")
         ui.label("不是告诉你买什么，而是让你看清那些数字怎么算、代表什么、什么时候会骗你。").classes("text-lg")
         with ui.card().classes("bg-red-50 w-full"):
@@ -271,6 +325,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
 
     @ui.page("/preset/{key}")
     async def preset_page(key: str) -> None:
+        ui.dark_mode().enable()
         ui.link("← 返回首页", "/")
         if key not in PRESETS_BY_KEY:
             ui.label(f"未知组合：{key}").classes("warn")
@@ -295,6 +350,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
 
     @ui.page("/lab")
     async def lab() -> None:
+        ui.dark_mode().enable()
         ui.link("← 返回首页", "/")
         ui.label("自定义组合实验室").classes("text-2xl font-bold")
         ui.label("拖动权重，然后点计算——所有数字与示例页面走完全相同的一套计算代码。").classes("muted")
@@ -358,6 +414,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
 
     @ui.page("/concepts")
     def concepts() -> None:
+        ui.dark_mode().enable()
         ui.link("← 返回首页", "/")
         ui.label("概念与陷阱").classes("text-2xl font-bold")
         _concept_cards(list(teaching.CARDS))

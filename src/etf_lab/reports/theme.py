@@ -1,4 +1,43 @@
+"""深色密集仪表盘的样式与展示基元。
 
+设计原则（对应产品定位）
+------------------------
+1. **默认视图零解释文字**：页面上只出现数字、表格、图；公式与「何时会骗人」
+   一律藏在 ``<details>`` 里，点击就地展开，不跳页。
+2. **密集**：12 栅格 + 指标键盘，信息密度优先于留白。
+3. **深色**：低亮度面板 + 高对比数字，长时间看不累。
+
+用 ``<details>/<summary>`` 而不是 JS 是有意的：静态站（路线 A）无需任何脚本即可交互，
+离线打开也照常工作。
+"""
+
+from __future__ import annotations
+
+import html
+from typing import Any, Mapping
+
+import plotly.graph_objects as go
+
+from etf_lab.content import teaching
+
+# 深色配色。低饱和背景 + 高对比文字，避免长时间阅读疲劳。
+PALETTE = {
+    "bg": "#0e1116",
+    "panel": "#151a22",
+    "panel_alt": "#1b2130",
+    "line": "#252c3a",
+    "fg": "#d8dee9",
+    "muted": "#8b95a7",
+    "accent": "#4da3ff",
+    "warn": "#ff7a59",
+    "ok": "#3ddc97",
+    "gold": "#e8c07d",
+    "purple": "#b98cff",
+}
+
+SERIES_COLORS = [PALETTE["accent"], PALETTE["ok"], PALETTE["gold"], PALETTE["purple"], PALETTE["warn"], "#5ec8d8"]
+
+STYLE = """
 :root {
   --bg:#0e1116; --panel:#151a22; --panel-alt:#1b2130; --line:#252c3a;
   --fg:#d8dee9; --muted:#8b95a7; --accent:#4da3ff; --warn:#ff7a59; --ok:#3ddc97; --gold:#e8c07d;
@@ -90,3 +129,121 @@ footer { border-top:1px solid var(--line); background:var(--panel); color:var(--
 footer .disclaimer { max-width:1500px; margin:0 auto 4px; }
 footer .meta { max-width:1500px; margin:0 auto; }
 .note { color:var(--muted); font-size:12px; margin-top:8px; }
+"""
+
+
+def esc(text: Any) -> str:
+    return html.escape(str(text))
+
+
+def pct(value: Any, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value) * 100:.{digits}f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def num(value: Any, digits: int = 2) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def bp(value: Any) -> str:
+    """基点显示：收益归因用 bp 比 % 更能看出差别。"""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value) * 10000:,.0f} bp"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def dark(fig: go.Figure, height: int | None = None) -> go.Figure:
+    """给图表套上统一深色样式。"""
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": PALETTE["fg"], "size": 12},
+        margin={"l": 54, "r": 20, "t": 40, "b": 34},
+        legend={"orientation": "h", "y": 1.08, "x": 0, "bgcolor": "rgba(0,0,0,0)"},
+        hoverlabel={"bgcolor": PALETTE["panel_alt"], "font": {"color": PALETTE["fg"]}},
+        title={"font": {"size": 13, "color": PALETTE["muted"]}},
+    )
+    fig.update_xaxes(gridcolor=PALETTE["line"], zerolinecolor=PALETTE["line"])
+    fig.update_yaxes(gridcolor=PALETTE["line"], zerolinecolor=PALETTE["line"])
+    if height:
+        fig.update_layout(height=height)
+    return fig
+
+
+def card_html(key: str) -> str:
+    """一张知识卡片（展开后显示）。"""
+    card = teaching.card(key)
+    return (
+        f'<div class="card">'
+        f'<h3>{esc(card["title"])}</h3>'
+        f'<div class="formula">{esc(card["formula"])}</div>'
+        f'<p><strong>说明什么：</strong>{esc(card["means"])}</p>'
+        f'<p class="mislead"><strong>什么时候会骗人：</strong>{esc(card["misleads"])}</p>'
+        f"</div>"
+    )
+
+
+def metric_tile(label: str, value: str, card: str | None = None, note: str | None = None) -> str:
+    """指标键盘里的一格：默认只有标签与数值，点开才看到公式与陷阱。"""
+    mark = '<span class="hintmark"> ◂</span>' if card else ""
+    if not card:
+        return f'<div class="tile" style="background:var(--panel-alt);border:1px solid var(--line);border-radius:7px;padding:8px 10px"><span class="label">{esc(label)}</span><span class="val">{esc(value)}</span></div>'
+    body = card_html(card)
+    if note:
+        body += f'<p class="note">{esc(note)}</p>'
+    return (
+        f'<details class="tile"><summary><span class="label">{esc(label)}{mark}</span>'
+        f'<span class="val">{esc(value)}</span></summary><div class="body">{body}</div></details>'
+    )
+
+
+def insight_html(insight: Mapping[str, Any], cards_lookup: Any = None) -> str:
+    """一条洞察条：标题是结论，展开是知识与证据数字。"""
+    level = str(insight.get("level", "info"))
+    evidence = insight.get("evidence") or {}
+    evidence_html = ""
+    if evidence:
+        rows = "".join(
+            f"<tr><td>{esc(k)}</td><td>{esc(_format_evidence(v))}</td></tr>" for k, v in evidence.items()
+        )
+        evidence_html = f'<table><tbody>{rows}</tbody></table>'
+    card_key = str(insight.get("card", ""))
+    card_block = card_html(card_key) if card_key else ""
+    return (
+        f'<details class="insight {esc(level)}"><summary>{esc(insight.get("title", ""))}</summary>'
+        f'<div class="body">{card_block}{evidence_html}</div></details>'
+    )
+
+
+def _format_evidence(value: Any) -> str:
+    if isinstance(value, float):
+        if abs(value) < 1.5 and value != 0:
+            return f"{value:.4f}"
+        return f"{value:,.2f}"
+    return str(value)
+
+
+def panel(title: str, body: str, *, span: int = 6, subtitle: str | None = None) -> str:
+    """一个仪表盘面板。"""
+    sub = f'<span class="sub">{esc(subtitle)}</span>' if subtitle else ""
+    return (
+        f'<section class="panel span-{span}"><header><h2>{esc(title)}</h2>{sub}</header>'
+        f"<div>{body}</div></section>"
+    )
+
+
+def figure_html(fig: go.Figure, div_id: str) -> str:
+    return fig.to_html(full_html=False, include_plotlyjs=False, div_id=div_id, config={"displaylogo": False, "responsive": True})

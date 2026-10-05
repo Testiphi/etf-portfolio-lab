@@ -137,6 +137,22 @@ def read_index_panel(
     return panel
 
 
+def read_etf_meta(con: duckdb.DuckDBPyConnection, symbols: Iterable[str]) -> pd.DataFrame:
+    """读取标的属性（资产类别、名称、跟踪指数等）。
+
+    仪表盘要用资产类别来判断"配出了什么结构"（例如是否含跨境/债券），
+    因此这是解锁机制的数据来源。
+    """
+    codes = list(symbols)
+    if not codes:
+        return pd.DataFrame()
+    sql = (
+        "SELECT symbol, name, asset_class, underlying_index, t_plus, is_cross_border "
+        f"FROM etf_meta WHERE symbol IN ({', '.join(['?'] * len(codes))})"
+    )
+    return con.execute(sql, codes).df()
+
+
 def table_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
     """各表行数——用于页面上的"数据底座"展示与断供排查。"""
     tables = [

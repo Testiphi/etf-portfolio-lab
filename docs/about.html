@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>关于与口径 · ETF 组合数值实验室</title>
+<title>口径 · ETF 组合数值实验室</title>
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/plotly.min.js"></script>
 </head>
@@ -11,48 +11,35 @@
 <header class="site-header">
   <a class="brand" href="index.html">ETF 组合数值实验室</a>
   <nav>
-    <a href="index.html">示例组合</a>
-    <a href="concepts.html">概念与陷阱</a>
-    <a href="about.html">关于与口径</a>
+    <a href="index.html">组合工作台</a>
+    <a href="concepts.html">知识附录</a>
+    <a href="about.html">口径</a>
   </nav>
 </header>
 <main>
 
-<section class="hero">
-  <h1>关于与口径</h1>
-  <p class="caveat">本站是教学与工具演示项目，帮助理解这些数字**怎么算、代表什么、何时会误导**。不提供投资建议、不推荐任何标的、不构成任何收益承诺。所有回测与模拟结果都是特定假设下的历史统计，不代表未来表现。</p>
-</section>
-<section>
-  <h2>数据来源与口径</h2>
-  <table>
-    <thead><tr><th>项目</th><th>说明</th></tr></thead>
-    <tbody>
-      <tr><td>ETF 行情</td><td>腾讯公开行情接口（主源），区间分页取完整历史</td></tr>
-      <tr><td>独立校验源</td><td>搜狐公开行情接口（未复权价），用于交叉校验主源收盘价</td></tr>
-      <tr><td>复权口径</td><td><strong>前复权</strong>用于一切收益计算；同时保留未复权价与复权因子</td></tr>
-      <tr><td>指数成分股</td><td>不使用指数成分股名单；风险敞口改用收益法风格分析（RBSA）</td></tr>
-      <tr><td>再平衡假设</td><td>每日再平衡（权重每天回到目标值）</td></tr>
-      <tr><td>无风险利率</td><td>教学场景固定取值，页面显示具体数值</td></tr>
-      <tr><td>缺失值</td><td>不做任何填充；标的未上市期间直接排除该日期</td></tr>
-    </tbody>
-  </table>
-</section>
-<section>
-  <h2>数据底座</h2>
-  <table><thead><tr><th>表</th><th>行数</th></tr></thead><tbody><tr><td>etf_meta</td><td>7</td></tr><tr><td>etf_price</td><td>23,494</td></tr><tr><td>index_price</td><td>24,775</td></tr><tr><td>fx_rate</td><td>0</td></tr><tr><td>bond_yield</td><td>0</td></tr><tr><td>future_daily</td><td>0</td></tr><tr><td>option_daily</td><td>0</td></tr><tr><td>result_cache</td><td>0</td></tr><tr><td>preset_portfolios</td><td>0</td></tr></tbody></table>
-  <p class="note">数据版本 <code>20261005T231624</code>。</p>
-</section>
-<section>
-  <h2>尚未接入</h2>
-  <p class="note">国债收益率曲线、股指期货基差与展期成本、ETF 期权与隐含波动率、汇率——
-  这四类数据需要另找公开接口。它们对应的教学内容（对冲成本、汇率贡献）在<a href="concepts.html">概念页</a>已有文字说明，
-  但暂未提供实测数字。</p>
-</section>
+<div class="titlebar"><div><h1>关于与口径</h1><div class="q">本站是教学与工具演示项目，帮助理解这些数字**怎么算、代表什么、何时会误导**。不提供投资建议、不推荐任何标的、不构成任何收益承诺。所有回测与模拟结果都是特定假设下的历史统计，不代表未来表现。</div></div></div>
+<div class="grid">
+  <section class="panel span-6"><header><h2>数据来源与口径</h2></header><div><table><tbody>
+  <tr><td>ETF 行情</td><td>腾讯公开接口（主源），按区间分页取完整历史</td></tr>
+  <tr><td>独立校验源</td><td>搜狐公开接口（未复权价），逐日交叉校验，中位差异为 0</td></tr>
+  <tr><td>复权口径</td><td><strong>前复权</strong>用于一切收益计算；同时保留未复权价与复权因子</td></tr>
+  <tr><td>指数成分股</td><td>不使用成分股名单；风险敞口将改用收益法风格分析（RBSA）</td></tr>
+  <tr><td>再平衡假设</td><td>每日再平衡（权重每天回到目标值）</td></tr>
+  <tr><td>无风险利率</td><td>教学场景固定 2.00%，页面显示具体取值</td></tr>
+  <tr><td>缺失值</td><td>不做任何填充；标的未上市期间直接排除该日期</td></tr>
+  <tr><td>风险贡献</td><td>成分 VaR 的欧拉分解（正态近似），之和等于组合 VaR</td></tr>
+  </tbody></table></div></section>
+  <section class="panel span-6"><header><h2>数据底座</h2></header><div><table><thead><tr><th>表</th><th>行数</th></tr></thead><tbody><tr><td>etf_meta</td><td>7</td></tr><tr><td>etf_price</td><td>23,494</td></tr><tr><td>index_price</td><td>24,775</td></tr><tr><td>fx_rate</td><td>0</td></tr><tr><td>bond_yield</td><td>0</td></tr><tr><td>future_daily</td><td>0</td></tr><tr><td>option_daily</td><td>0</td></tr><tr><td>result_cache</td><td>0</td></tr><tr><td>preset_portfolios</td><td>0</td></tr></tbody></table><p class='note'>数据版本 <code>20261005T231624</code>。</p></div></section>
+  <section class="panel span-12"><header><h2>尚未接入</h2></header><div><p class="note">国债收益率曲线、股指期货基差与展期成本、ETF 期权与隐含波动率、汇率——
+  这四类数据需要另找公开接口。它们对应的概念卡片（久期、Greeks、汇率贡献、对冲成本）
+  已经可以在「可解锁模块」里提前读到，但暂无实测数字。</p></div></section>
+</div>
 
 </main>
 <footer>
   <p class="disclaimer">本站是教学与工具演示项目，帮助理解这些数字**怎么算、代表什么、何时会误导**。不提供投资建议、不推荐任何标的、不构成任何收益承诺。所有回测与模拟结果都是特定假设下的历史统计，不代表未来表现。</p>
-  <p class="meta">版本 0.1.0 · 数据版本 20261005T231624 · 生成于 2026-10-05 23:24</p>
+  <p class="meta">版本 0.1.0 · 数据版本 20261005T231624 · 生成于 2026-10-05 23:41</p>
 </footer>
 </body>
 </html>
