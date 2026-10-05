@@ -28,6 +28,9 @@ FIGURE_SUFFIXES = (
     "fig-expo",
     "fig-vol",
     "fig-prot",
+    "fig-mcfan",
+    "fig-mchist",
+    "fig-mcconv",
     "fig-epi",
 )
 

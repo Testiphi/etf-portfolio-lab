@@ -342,10 +342,10 @@ UNLOCK_CATALOG: tuple[dict[str, Any], ...] = (
         "key": "monte_carlo",
         "title": "蒙特卡洛分布与收敛诊断",
         "card": "monte_carlo",
-        "trigger": "打开实验室的模拟开关",
-        "requirement": "lab",
-        "implemented": False,
-        "pending": "需要 core/simulate.py",
+        "trigger": "任何组合（四个模型并排对比）",
+        "requirement": "always",
+        "implemented": True,
+        "pending": "GARCH 为自实现（方差目标化 MLE）；协整/多资产联合模拟尚未接入",
     },
 )
 

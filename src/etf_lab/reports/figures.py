@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import plotly.graph_objects as go
 
 from etf_lab.reports import theme
@@ -225,6 +226,97 @@ def fig_protection_curve(result: dict) -> go.Figure:
         yaxis={"title": "成本（占标的价值）", "tickformat": ".1%"},
     )
     return theme.dark(fig, height=300)
+
+
+def _mc_default(result: dict) -> dict:
+    block = result.get("monte_carlo") or {}
+    models = block.get("models") or {}
+    return models.get(str(block.get("default_model", "bootstrap"))) or {}
+
+
+def fig_mc_fan(result: dict) -> go.Figure:
+    """扇形图：分位带随时间展开，把"一个点估计"变成"一个分布"。"""
+    model = _mc_default(result)
+    percentiles = model.get("percentiles") or {}
+    horizon = int((model or {}).get("horizon_days", 0) or 0)
+    if not percentiles or horizon <= 0:
+        fig = go.Figure()
+        fig.update_layout(title="蒙特卡洛（数据不足）")
+        return theme.dark(fig, height=300)
+
+    steps = list(range(model.get("record_every", 21), horizon + 1, model.get("record_every", 21)))
+    if not steps or steps[-1] != horizon:
+        steps.append(horizon)
+    years = [step / 252 for step in steps]
+
+    def series(key: str) -> list[float]:
+        values = percentiles.get(key) or []
+        return values[: len(years)]
+
+    fig = go.Figure()
+    # 5%~95% 带
+    fig.add_trace(go.Scatter(x=years, y=series("p95"), name="95% 分位", line={"color": P["accent"], "width": 1, "dash": "dot"}))
+    fig.add_trace(
+        go.Scatter(
+            x=years,
+            y=series("p5"),
+            name="5% 分位",
+            line={"color": P["accent"], "width": 1, "dash": "dot"},
+            fill="tonexty",
+            fillcolor="rgba(77,163,255,0.15)",
+        )
+    )
+    fig.add_trace(go.Scatter(x=years, y=series("p50"), name="中位路径", line={"color": P["fg"], "width": 2.5}))
+    fig.add_trace(go.Scatter(x=years, y=series("p25"), name="25% 分位", line={"color": P["ok"], "width": 1}))
+    fig.add_trace(go.Scatter(x=years, y=series("p75"), name="75% 分位", line={"color": P["ok"], "width": 1}))
+    fig.update_layout(
+        title=f"净值分位带（{model.get('label') or ''}）",
+        xaxis={"title": "年"},
+        yaxis={"title": "净值倍数（起点 1.0）"},
+    )
+    return theme.dark(fig, height=320)
+
+
+def fig_mc_histogram(result: dict) -> go.Figure:
+    """终值分布直方图：只看分位会丢掉"分布长什么样"。"""
+    model = _mc_default(result)
+    histogram = model.get("histogram") or {}
+    counts, edges = histogram.get("counts"), histogram.get("edges")
+    if not counts or not edges:
+        fig = go.Figure()
+        fig.update_layout(title="终值分布（数据不足）")
+        return theme.dark(fig, height=280)
+    centers = [(edges[i] + edges[i + 1]) / 2 for i in range(len(counts))]
+    fig = go.Figure(go.Bar(x=centers, y=counts, marker_color=P["accent"], name="路径数"))
+    fig.update_layout(
+        title="终值分布",
+        xaxis={"title": "终值（净值倍数）"},
+        yaxis={"title": "路径数"},
+        bargap=0.02,
+    )
+    return theme.dark(fig, height=280)
+
+
+def fig_mc_convergence(result: dict) -> go.Figure:
+    """收敛诊断：标准误随路径数的下降，双对数图上应接近斜率 −0.5。"""
+    model = _mc_default(result)
+    convergence = model.get("convergence") or []
+    fig = go.Figure()
+    if convergence:
+        xs = [row["n_paths"] for row in convergence]
+        ys = [row["standard_error"] for row in convergence]
+        fig.add_trace(go.Scatter(x=xs, y=ys, name="实际标准误", mode="lines+markers", line={"color": P["gold"], "width": 2}))
+        if xs and ys and ys[0] > 0:
+            ideal = [ys[0] * np.sqrt(xs[0] / x) for x in xs]
+            fig.add_trace(
+                go.Scatter(x=xs, y=ideal, name="理想 1/√N", mode="lines", line={"color": P["muted"], "dash": "dash", "width": 1})
+            )
+    fig.update_layout(
+        title="收敛诊断：标准误 vs 路径数",
+        xaxis={"title": "路径数", "type": "log"},
+        yaxis={"title": "标准误", "type": "log"},
+    )
+    return theme.dark(fig, height=280)
 
 
 def fig_per_asset(result: dict) -> go.Figure:

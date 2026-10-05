@@ -27,7 +27,7 @@ import pandas as pd
 from etf_lab import __version__
 from etf_lab.content import teaching
 from etf_lab.content.episodes import EPISODES
-from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, metrics, returns
+from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, metrics, returns, simulate as simulate_mod
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
@@ -195,6 +195,108 @@ def _exposure_table(result: Mapping[str, Any]) -> str:
         f"<tbody>{body}</tbody></table>"
         f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
         f"{warn_html}"
+    )
+
+
+def _monte_carlo_block(nav: pd.Series, rf_annual: float) -> dict[str, Any]:
+    """蒙特卡洛：把点估计变成分布，并**并排展示多个模型**。
+
+    为什么要跑四个模型：同一份历史数据，用不同假设模拟出来的达标概率可以差出几十个百分点。
+    这个差异本身就是最重要的结论——它说明"未来收益分布"从来不是从数据里读出来的，
+    而是你**假设**出来的。只给一个模型的结果，等于把假设藏起来。
+    """
+    try:
+        returns = nav.pct_change().dropna()
+        if len(returns) < 250:
+            return {}
+        results = simulate_mod.simulate_all_models(
+            returns,
+            # 4000 条路径：长期限下 1% 分位的标准误约为 8%（2000 条时会到 11%），
+            # 路径数太少时那个数字本身在抖，不该拿来当结论
+            n_paths=4000,
+            horizon_days=1260,
+            seed=20260101,
+            goal_annual=0.08,
+            deep_drawdown=-0.30,
+        )
+        if not results:
+            return {}
+        default = next((r for r in results if r.model == "bootstrap"), results[0])
+        return {
+            "params": {
+                "n_paths": default.n_paths,
+                "horizon_days": default.horizon_days,
+                "horizon_years": round(default.horizon_days / 252, 2),
+                "goal_annual": default.risk["goal_annual"],
+                "deep_drawdown": default.risk["deep_drawdown"],
+                "seed": default.seed,
+            },
+            "default_model": default.model,
+            "models": {r.model: r.as_dict() for r in results},
+            "comparison": simulate_mod.model_comparison(results),
+            "warning": default.warning,
+            "note": (
+                "所有模型都只用**历史收益**拟合：它模拟不出历史里没出现过的极端事件。"
+                "达标概率 = 终值 ≥ 期初 ×(1+目标年化)^年数 的路径占比；"
+                "深度回撤概率 = 途中触及阈值（比只看终值更贴近实际体验）"
+            ),
+        }
+    except Exception:  # noqa: BLE001 - 模拟失败不应影响其它面板
+        return {}
+
+
+def _monte_carlo_tables(result: Mapping[str, Any]) -> str:
+    block = result.get("monte_carlo") or {}
+    rows = block.get("comparison") or []
+    if not rows:
+        return "<p class='note'>蒙特卡洛需要足够长的历史样本，当前不可用。</p>"
+
+    params = block.get("params") or {}
+    body = ""
+    goal_probs = [float(row["prob_goal"]) for row in rows]
+    spread = (max(goal_probs) - min(goal_probs)) / max(min(goal_probs), 1e-9) if goal_probs else 0.0
+    for row in rows:
+        warn = " warn-text" if row.get("warning") else ""
+        body += (
+            f'<tr><td>{theme.esc(row["label"])}</td>'
+            f'<td>{theme.pct(row["prob_goal"])}</td>'
+            f'<td>{theme.pct(row["prob_loss"])}</td>'
+            f'<td class="warn">{theme.pct(row["prob_deep_drawdown"])}</td>'
+            f'<td>{theme.num(row["median_terminal"], 3)}</td>'
+            f'<td>{theme.num(row["p5_terminal"], 3)}</td>'
+            f'<td>{theme.pct(row["p95_max_drawdown"])}</td></tr>'
+        )
+    warning = block.get("warning")
+    warn_html = f'<p class="note warn-text">⚠ {theme.esc(warning)}</p>' if warning else ""
+    # 措辞要随事实变化：模型结论接近时说"不敏感"，差距大时说"敏感"。
+    # 一句写死的"模型差异很大"在四个模型意见一致时就是误导。
+    if spread < 0.05:
+        spread_text = (
+            f'四个模型的达标概率相对差距只有 <b>{spread:.0%}</b>——这次结论对模型选择<b>不敏感</b>，'
+            "可以当作相对稳健的结果。"
+        )
+    elif spread < 0.20:
+        spread_text = (
+            f'四个模型的达标概率相对差距约 <b>{spread:.0%}</b>——属于中等敏感：'
+            "结论方向一致，但具体数字不要当成精确值。"
+        )
+    else:
+        spread_text = (
+            f'四个模型的达标概率相对差距达 <b>{spread:.0%}</b>——结论对模型选择<b>高度敏感</b>，'
+            "此时任何单一模型的数字都不能单独看。"
+        )
+    return (
+        f'<p class="note">路径数 {params.get("n_paths")}，期限 {params.get("horizon_days")} 个交易日'
+        f'（约 {params.get("horizon_years")} 年），目标年化 {theme.pct(params.get("goal_annual"))}，'
+        f'深度回撤阈值 {theme.pct(params.get("deep_drawdown"))}，随机种子 {params.get("seed")}（可复现）。</p>'
+        "<table><thead><tr><th>模型</th><th>达标概率</th><th>亏损概率</th>"
+        "<th>深度回撤概率</th><th>中位终值</th><th>下5%终值</th><th>下5%回撤</th></tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+        f'<p class="note">{spread_text}</p>'
+        "<p class='note'>注意「下 5% 终值」在长期限下也与正态接近——日频厚尾在几百天求和后会被平均掉。"
+        "厚尾真正影响的是**路径回撤**与短期限风险，这一点在 GARCH 与 Student-t 的深度回撤概率上看得出来。</p>"
+        f"{warn_html}"
+        f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
     )
 
 
@@ -463,6 +565,7 @@ def compute_preset(
     premium = _premium_block(con, symbols, spec.weights, start)
     exposure_block = _exposure_block(con, aligned, spec.weights, start, name_by_symbol)
     derivatives_block = _derivatives_block(nav, aligned, rf_annual)
+    monte_carlo_block = _monte_carlo_block(nav, rf_annual)
 
     # 历史情节重放：基准指数可回溯到 2005 年，组合净值则受成分标的上市时间限制
     try:
@@ -552,6 +655,7 @@ def compute_preset(
         "premium_discount": premium,
         "exposure": exposure_block,
         "derivatives": derivatives_block,
+        "monte_carlo": monte_carlo_block,
         "episodes": episode_block,
         "diagnostics": diagnostics,
         "max_drawdown_info": {
@@ -787,6 +891,12 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     + "这正是「最需要保险时保险最贵」的来源。</p>", span=5)}
   {theme.panel("保护成本曲线", theme.figure_div(figures.fig_protection_curve(result), f"{prefix}fig-prot", figs), span=7)}
   {theme.panel("保护成本与 Greeks（理论值）", _derivatives_table(result), span=12)}
+  {theme.panel("蒙特卡洛：终值分布扇形图", theme.figure_div(figures.fig_mc_fan(result), f"{prefix}fig-mcfan", figs), span=7)}
+  {theme.panel("终值分布直方图", theme.figure_div(figures.fig_mc_histogram(result), f"{prefix}fig-mchist", figs), span=5)}
+  {theme.panel("收敛诊断：路径数够不够", theme.figure_div(figures.fig_mc_convergence(result), f"{prefix}fig-mcconv", figs)
+    + "<p class='note'>标准误应大致按 1/√N 下降（双对数图上是一条斜率 −0.5 的直线）。"
+    + "偏离这条线说明结果对路径数仍敏感，那个数字就还在抖。</p>", span=5)}
+  {theme.panel("四个模型的结论对比", _monte_carlo_tables(result), span=7)}
   {theme.panel("历史情节重放", theme.figure_div(figures.fig_episodes(result), f"{prefix}fig-epi", figs)
     + _episodes_block(result), span=12)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
@@ -894,7 +1004,7 @@ def render_concepts(*, root: str = "") -> str:
         "tracking_error", "adjustment", "risk_contribution", "premium_discount",
         "arithmetic_vs_geometric", "leverage_unwind", "liquidity_spiral",
         "implied_volatility", "credit_spread_cds", "fx_exposure", "duration",
-        "greeks", "monte_carlo", "hedging",
+        "greeks", "protection_cost", "monte_carlo", "tail_crossover", "hedging",
     ]
     cards = "".join(theme.card_html(k) for k in keys)
     body = f"""
