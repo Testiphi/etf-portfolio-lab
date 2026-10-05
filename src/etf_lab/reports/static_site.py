@@ -55,10 +55,30 @@ BENCHMARK_INDEX = "000300"
 # --------------------------------------------------------------------------- #
 # 计算层：只产出可序列化的字典
 # --------------------------------------------------------------------------- #
-def _series_to_pairs(series: pd.Series, precision: int = 6, step: int = 1) -> list[list[Any]]:
-    """序列 → ``[[日期, 值], ...]``。``step`` 用于抽稀，避免 JSON 过大。"""
-    trimmed = series.iloc[::step]
-    return [[str(idx.date()), round(float(val), precision)] for idx, val in trimmed.items()]
+def _series_to_pairs(
+    series: pd.Series,
+    precision: int = 6,
+    step: int = 1,
+    keep_extremes: bool = False,
+) -> list[list[Any]]:
+    """序列 → ``[[日期, 值], ...]``。
+
+    ``step`` 用于抽稀：日频曲线在约 1000 像素宽的图上根本分辨不出 3000 个点，
+    而它却是页面体积的大头（三档合计 446 KB，占整页 85%）。
+
+    ``keep_extremes=True`` 时额外保留首尾与极值点——单纯等距抽稀有可能
+    恰好丢掉最深的那一天，那正是读者最需要看到的点。
+    """
+    if series.empty:
+        return []
+    if step > 1:
+        picked = series.iloc[::step]
+        if keep_extremes and len(series) > 2:
+            extras = {series.index[0], series.index[-1], series.idxmin(), series.idxmax()}
+            picked = series.loc[sorted(set(picked.index) | extras)]
+    else:
+        picked = series
+    return [[str(idx.date()), round(float(val), precision)] for idx, val in picked.items()]
 
 
 def _asset_summary(nav: pd.Series) -> dict[str, Any]:
@@ -432,8 +452,8 @@ def compute_preset(
         "n_obs": int(len(aligned)),
         "data_version": repo.latest_data_version(con),
         "rf_annual": rf_annual,
-        "nav": _series_to_pairs(nav, step=1),
-        "drawdown": _series_to_pairs(drawdown, step=1),
+        "nav": _series_to_pairs(nav, step=3, keep_extremes=True),
+        "drawdown": _series_to_pairs(drawdown, step=3, keep_extremes=True),
         "rolling_sharpe": _series_to_pairs(rolling, step=5),
         "correlation": {
             "labels": [str(c) for c in corr_ordered.columns],
@@ -646,12 +666,14 @@ def _unlocks_block(result: Mapping[str, Any]) -> str:
     )
 
 
-def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
+def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[str, Any] | None = None) -> str:
     """一个组合的完整仪表盘（不含页头页脚），供独立页与首屏档位切换共用。
 
     ``prefix`` 会加到每个图表容器的 id 前面。**这是必需的**：首屏把多个组合的仪表盘
     内联在同一页里，若 id 重复，浏览器 ``getElementById`` 只返回第一个匹配，
     Plotly 会把所有图都画进第一档的容器，其余档位一片空白——本项目真的踩过这个坑。
+
+    ``figs`` 收集各图的 data/layout，由调用方写进独立的 ``data/*.figs.js``。
     """
     weights_chips = " · ".join(f"{theme.esc(s)} {w:.0%}" for s, w in result["weights"].items())
     return f"""
@@ -666,8 +688,8 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
 {_metrics_keyboard(result)}
 
 <div class="grid" style="margin-top:12px">
-  {theme.panel("净值与水下曲线", theme.figure_html(figures.fig_nav(result), f"{prefix}fig-nav"), span=8)}
-  {theme.panel("收益归因", theme.figure_html(figures.fig_return_contribution(result), f"{prefix}fig-attrib")
+  {theme.panel("净值与水下曲线", theme.figure_div(figures.fig_nav(result), f"{prefix}fig-nav", figs), span=8)}
+  {theme.panel("收益归因", theme.figure_div(figures.fig_return_contribution(result), f"{prefix}fig-attrib", figs)
     + "<p class='note'>归因用<b>对数贡献</b>（各标的的对数收益 × 权重）：它扣掉了每个标的自身的复利效应，"
     + "量级与实际收益可比。算术贡献会被各标的自身的波动拖累主导（长周期里单一标的能到 +8000bp，"
     + "而组合实际累计只有几十个百分点），那种数字无法解读。</p>"
@@ -679,16 +701,16 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
     + theme.pct((result.get('risk_contribution') or {}).get('rebalancing_effect'))
     + "</b> 就是<b>再平衡/分散化效应</b>——由 Jensen 不等式它恒为非负："
     + "每日再平衡会在波动中不断把权重拉回目标，从而多得一部分收益。</p>", span=4)}
-  {theme.panel("权重 vs 风险贡献", theme.figure_html(figures.fig_risk_vs_weight(result), f"{prefix}fig-risk"), span=6)}
+  {theme.panel("权重 vs 风险贡献", theme.figure_div(figures.fig_risk_vs_weight(result), f"{prefix}fig-risk", figs), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
-  {theme.panel("定投：市值 vs 累计投入", theme.figure_html(figures.fig_dca(result), f"{prefix}fig-dca"), span=6)}
-  {theme.panel("滚动一年夏普", theme.figure_html(figures.fig_rolling_sharpe(result), f"{prefix}fig-roll"), span=4)}
+  {theme.panel("定投：市值 vs 累计投入", theme.figure_div(figures.fig_dca(result), f"{prefix}fig-dca", figs), span=6)}
+  {theme.panel("滚动一年夏普", theme.figure_div(figures.fig_rolling_sharpe(result), f"{prefix}fig-roll", figs), span=4)}
   {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
-  {theme.panel("各标的年化 vs 最大回撤", theme.figure_html(figures.fig_per_asset(result), f"{prefix}fig-asset"), span=4)}
-  {theme.panel("因子敞口矩阵（热力图）", theme.figure_html(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo"), span=12)}
+  {theme.panel("各标的年化 vs 最大回撤", theme.figure_div(figures.fig_per_asset(result), f"{prefix}fig-asset", figs), span=4)}
+  {theme.panel("因子敞口矩阵（热力图）", theme.figure_div(figures.fig_exposure_heatmap(result), f"{prefix}fig-expo", figs), span=12)}
   {theme.panel("敞口明细与拟合质量", _exposure_table(result), span=12)}
-  {theme.panel("历史情节重放", theme.figure_html(figures.fig_episodes(result), f"{prefix}fig-epi")
+  {theme.panel("历史情节重放", theme.figure_div(figures.fig_episodes(result), f"{prefix}fig-epi", figs)
     + _episodes_block(result), span=12)}
   {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
   {theme.panel("可解锁模块", _unlocks_block(result), span=12)}
@@ -696,10 +718,21 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "") -> str:
 """
 
 
-def render_preset_page(result: Mapping[str, Any], *, root: str = "") -> str:
+def render_preset_page(result: Mapping[str, Any], *, dashboard: str, root: str = "") -> str:
+    """独立组合页。复用首屏已经渲染好的仪表盘 HTML，避免重复构建图表。
+
+    图表数据与首屏共用同一个 ``data/<key>.figs.js``（容器 id 带同一个前缀），
+    因此同一份数据只写一次、两处都能用。
+    """
+    key = str(result.get("key", "preset"))
+    body = (
+        dashboard
+        + f'\n<script src="{root}assets/lab.js"></script>'
+        + f'\n<script>labInitSingle("{key}", "{root}data/{key}.figs.js");</script>'
+    )
     return _page(
         f"{result['name']} · ETF 组合数值实验室",
-        render_dashboard(result, prefix=f"{result.get('key', 'p')}-"),
+        body,
         root=root,
         data_version=str(result.get("data_version", "—")),
     )
@@ -717,12 +750,25 @@ def _gear_css(count: int) -> str:
     return "<style>" + "".join(rules) + "</style>"
 
 
-def render_index(results: Sequence[Mapping[str, Any]], *, counts: Mapping[str, int], data_version: str, root: str = "") -> str:
-    """首屏：**一进来就是数据**。档位切换预先把每个组合的仪表盘都渲染进同一页，
-    纯 CSS 切换，因此切组合不刷新、不跳页。"""
+def render_index(
+    results: Sequence[Mapping[str, Any]],
+    *,
+    dashboards: Mapping[str, str],
+    counts: Mapping[str, int],
+    data_version: str,
+    root: str = "",
+) -> str:
+    """首屏：**一进来就是数据**。档位切换用纯 CSS，图表数据按档位**懒加载**。
+
+    懒加载是必需的：三档的图表 JSON 合计约 785 KB（占原页面 85%），
+    一次性全塞进 HTML 既拖慢首屏也不可 diff。现在首屏只装载当前档位的数据，
+    切换时再取——每个档位一个独立文件，浏览器可缓存。
+    """
     inputs = "".join(
-        f'<input class="gear-input" type="radio" name="gear" id="gear{i}"{" checked" if i == 0 else ""}>'
-        for i in range(len(results))
+        f'<input class="gear-input" type="radio" name="gear" id="gear{i}"'
+        f' data-key="{theme.esc(str(r.get("key")))}" data-src="{root}data/{theme.esc(str(r.get("key")))}.figs.js"'
+        f'{" checked" if i == 0 else ""}>'
+        for i, r in enumerate(results)
     )
     labels = "".join(
         f'<label for="gear{i}">{theme.esc(r.get("name", r.get("key")))}</label>' for i, r in enumerate(results)
@@ -737,8 +783,7 @@ def render_index(results: Sequence[Mapping[str, Any]], *, counts: Mapping[str, i
         "</div></details>"
     )
     panes = "".join(
-        f'<section class="gear-pane" id="pane{i}">'
-        f'{render_dashboard(r, prefix=str(r.get("key", f"p{i}")) + "-")}</section>'
+        f'<section class="gear-pane" id="pane{i}">{dashboards.get(str(r.get("key")), "")}</section>'
         for i, r in enumerate(results)
     )
     counts_rows = "".join(f"<tr><td>{theme.esc(k)}</td><td>{v:,}</td></tr>" for k, v in counts.items() if v)
@@ -754,8 +799,13 @@ def render_index(results: Sequence[Mapping[str, Any]], *, counts: Mapping[str, i
     + f"<p class='note'>数据版本 <code>{theme.esc(data_version)}</code>。行情来自公开接口，数据不随仓库分发。</p>", span=6)}
   {theme.panel("怎么读这个站", '''<p class="note">上面每一格数字里都有 <span class="hintmark">◂</span>，点开才是公式与「什么时候会骗人」。默认视图不放讲解。</p>
   <p class="note">页面里的<b>洞察条</b>不是写好的文案，而是规则引擎读你这份组合算出来的数字后浮出来的——
-  换个组合，浮出来的提醒就变了。配出特定结构（含跨境、含债券、带对冲）还会解锁对应模块。</p>''', span=6)}
+  换个组合，浮出来的提醒就变了。配出特定结构（含跨境、含债券、带对冲）还会解锁对应模块。</p>
+  <p class="note">图表数据按档位单独存放、切换时按需加载；这样首页只有几十 KB，
+  而每个档位的数据文件都会被浏览器缓存。曲线做了抽稀并保留极值点，
+  画面上看不出差别，体积却小很多。</p>''', span=6)}
 </div>
+<script src="{root}assets/lab.js"></script>
+<script>labInitTabs();</script>
 """
     return _page("ETF 组合数值实验室 · 组合工作台", body, root=root, data_version=data_version)
 
@@ -854,16 +904,35 @@ def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_an
     (out / "assets" / "style.css").write_text(theme.STYLE, encoding="utf-8")
 
     results: list[dict[str, Any]] = []
+    dashboards: dict[str, str] = {}
+    figs_by_key: dict[str, dict[str, Any]] = {}
     failures: list[str] = []
     for spec in PRESETS:
         try:
             result = compute_preset(con, spec, rf_annual=rf_annual)
-            (out / f"{spec.key}.html").write_text(render_preset_page(result, root=""), encoding="utf-8")
+            figs: dict[str, Any] = {}
+            # 仪表盘只渲染一次，首屏与独立页共用；图表数据同时被收集起来写文件
+            dashboards[spec.key] = render_dashboard(result, prefix=f"{spec.key}-", figs=figs)
+            figs_by_key[spec.key] = figs
             results.append(result)
         except Exception as exc:  # noqa: BLE001 - 单个组合作不出来不应让整站失败
             failures.append(f"{spec.key}: {type(exc).__name__}: {exc}")
 
-    (out / "index.html").write_text(render_index(results, counts=counts, data_version=data_version), encoding="utf-8")
+    # 图表 JSON 外置：页面因此只有几十 KB，数据文件按档位懒加载且可被缓存
+    data_dir = out / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for key, figs in figs_by_key.items():
+        (data_dir / f"{key}.figs.js").write_text(theme.figure_data_js(figs), encoding="utf-8")
+    (out / "assets" / "lab.js").write_text(theme.LAB_JS, encoding="utf-8")
+
+    (out / "index.html").write_text(
+        render_index(results, dashboards=dashboards, counts=counts, data_version=data_version), encoding="utf-8"
+    )
+    for result in results:
+        key = str(result["key"])
+        (out / f"{key}.html").write_text(
+            render_preset_page(result, dashboard=dashboards[key]), encoding="utf-8"
+        )
     (out / "concepts.html").write_text(render_concepts(), encoding="utf-8")
     (out / "about.html").write_text(render_about(counts=counts, data_version=data_version), encoding="utf-8")
     (out / ".nojekyll").write_text("", encoding="utf-8")

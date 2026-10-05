@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 import html
+import json
 from typing import Any, Mapping
 
 import plotly.graph_objects as go
+import plotly.io as plotly_io
 
 from etf_lab.content import teaching
 
@@ -280,6 +282,85 @@ def _format_evidence(value: Any) -> str:
     return str(value)
 
 
+def figure_div(fig: go.Figure, div_id: str, figs: dict[str, Any] | None = None) -> str:
+    """渲染图表**容器**，并把图的 data/layout 收进 ``figs``（由调用方写出成独立的 .js）。
+
+    为什么要拆出去
+    --------------
+    三档仪表盘内联在一页时，图表 JSON 占了页面体积的 85%（实测 920 KB 里 785 KB）。
+    拆成独立文件后 HTML 变得可读可 diff、浏览器可并行下载并缓存，
+    而 **双击离线打开依然可用**——这正是不能简单换成「JSON + fetch()」的原因：
+    ``file://`` 下 fetch 会被 CORS 拦，``<script src>`` 不会。
+    """
+    if figs is not None:
+        # 走 plotly 自己的序列化，避免 numpy 标量混进 json.dumps
+        figs[div_id] = json.loads(plotly_io.to_json(fig))
+    return f'<div id="{div_id}" style="width:100%"></div>'
+
+
+def figure_data_js(figs: Mapping[str, Any]) -> str:
+    """把一组图合并成一个可被 ``<script src>`` 装载的数据文件。"""
+    payload = json.dumps(dict(figs), ensure_ascii=False, separators=(",", ":"))
+    return (
+        "window.__LAB_FIGS__ = Object.assign(window.__LAB_FIGS__ || {}, "
+        + payload
+        + ");\n"
+    )
+
+
+LAB_JS = """// 图表的按需装载与绘制。
+// 之所以用脚本注入而不是 fetch：file:// 下 fetch 会被 CORS 拦，脚本标签不会，
+// 因此这个站点双击打开也能正常工作。
+window.__LAB_FIGS__ = window.__LAB_FIGS__ || {};
+window.__LAB_LOADED__ = window.__LAB_LOADED__ || {};
+
+function labDraw() {
+  Object.keys(window.__LAB_FIGS__).forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el || el.dataset.labDrawn === "1") return;
+    // 容器不可见（档位未选中）时不画：Plotly 在 display:none 的容器里量不到尺寸
+    if (el.offsetParent === null) return;
+    Plotly.newPlot(id, window.__LAB_FIGS__[id].data, window.__LAB_FIGS__[id].layout,
+                   {displaylogo: false, responsive: true});
+    el.dataset.labDrawn = "1";
+  });
+}
+
+function labLoad(key, path) {
+  if (window.__LAB_LOADED__[key]) { labDraw(); return; }
+  window.__LAB_LOADED__[key] = true;
+  var script = document.createElement("script");
+  script.src = path;
+  script.onload = labDraw;
+  script.onerror = function () { console.error("图表数据加载失败：" + path); };
+  document.head.appendChild(script);
+}
+
+// 首屏只装载当前选中档位的数据；切换档位时按需再装载。
+function labInitTabs() {
+  var inputs = document.querySelectorAll('input[name="gear"]');
+  inputs.forEach(function (input) {
+    input.addEventListener("change", function () {
+      if (input.checked) labLoad(input.dataset.key, input.dataset.src);
+      // 之前因不可见而跳过的图，会在切回该档时补画
+      window.setTimeout(labDraw, 0);
+    });
+  });
+  var checked = document.querySelector('input[name="gear"]:checked') || inputs[0];
+  if (checked) labLoad(checked.dataset.key, checked.dataset.src);
+}
+
+// 独立组合页：容器本来就是可见的，直接装载即可。
+function labInitSingle(key, path) {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () { labLoad(key, path); });
+  } else {
+    labLoad(key, path);
+  }
+}
+"""
+
+
 def panel(title: str, body: str, *, span: int = 6, subtitle: str | None = None) -> str:
     """一个仪表盘面板。"""
     sub = f'<span class="sub">{esc(subtitle)}</span>' if subtitle else ""
@@ -290,4 +371,9 @@ def panel(title: str, body: str, *, span: int = 6, subtitle: str | None = None) 
 
 
 def figure_html(fig: go.Figure, div_id: str) -> str:
+    """（已弃用）内联整张图的 HTML。
+
+    保留是为了兼容旧调用；新代码请用 :func:`figure_div`——把图表 JSON 拆成独立
+    数据文件后，页面体积从 920 KB 降到几十 KB。
+    """
     return fig.to_html(full_html=False, include_plotlyjs=False, div_id=div_id, config={"displaylogo": False, "responsive": True})

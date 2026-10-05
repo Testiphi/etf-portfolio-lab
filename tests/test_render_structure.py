@@ -16,7 +16,7 @@ import pytest
 
 from etf_lab.data import repo
 from etf_lab.presets import PortfolioSpec
-from etf_lab.reports import static_site
+from etf_lab.reports import static_site, theme
 
 FIGURE_SUFFIXES = (
     "fig-nav",
@@ -161,7 +161,15 @@ def test_gear_panes_have_unique_figure_ids(tmp_path: Path) -> None:
     version = repo.latest_data_version(con)
     con.close()
 
-    html = static_site.render_index(results, counts=counts, data_version=version)
+    dashboards: dict[str, str] = {}
+    figs_by_key: dict[str, dict] = {}
+    for result in results:
+        key = str(result["key"])
+        figs: dict = {}
+        dashboards[key] = static_site.render_dashboard(result, prefix=f"{key}-", figs=figs)
+        figs_by_key[key] = figs
+
+    html = static_site.render_index(results, dashboards=dashboards, counts=counts, data_version=version)
 
     ids = re.findall(r'id="([^"]+)"', html)
     duplicates = sorted({value for value in ids if ids.count(value) > 1})
@@ -172,9 +180,29 @@ def test_gear_panes_have_unique_figure_ids(tmp_path: Path) -> None:
         for suffix in FIGURE_SUFFIXES:
             assert f'id="{key}-{suffix}"' in html, f"缺少 {key}-{suffix}"
 
-    # 容器数量与 Plotly 绘图调用数量必须一致，否则说明有图没被画
-    plot_calls = re.findall(r"Plotly\.newPlot\(\s*[\"']([^\"']+)[\"']", html)
-    assert sorted(plot_calls) == sorted(f"{key}-{suffix}" for key in ("one", "two", "three") for suffix in FIGURE_SUFFIXES)
+    # 图表数据必须全部外置到数据文件里（页面本身不再内联 Plotly 数据）
+    assert "Plotly.newPlot(" not in html, "页面里不应再内联绘图脚本"
+    all_fig_ids = {fid for figs in figs_by_key.values() for fid in figs}
+    assert all_fig_ids == {f"{key}-{suffix}" for key in ("one", "two", "three") for suffix in FIGURE_SUFFIXES}
+    data_js = theme.figure_data_js(figs_by_key["one"])
+    assert '"one-fig-nav"' in data_js
+
+
+def test_curves_are_downsampled_but_keep_extremes() -> None:
+    """抽稀必须保留极值点：等距抽稀有可能恰好丢掉最深的那一天。"""
+    index = pd.date_range("2020-01-01", periods=1000, freq="B")
+    values = np.linspace(1.0, 2.0, 1000)
+    values[777] = 0.5  # 一个孤立的最深点
+    series = pd.Series(values, index=index)
+
+    pairs = static_site._series_to_pairs(series, step=10, keep_extremes=True)
+    dates = [row[0] for row in pairs]
+    assert len(pairs) < 200, "应当被抽稀"
+    assert str(index[777].date()) in dates, "极值点不能被抽稀丢掉"
+    assert str(index[0].date()) in dates and str(index[-1].date()) in dates
+
+    without = [row[0] for row in static_site._series_to_pairs(series, step=10, keep_extremes=False)]
+    assert str(index[777].date()) not in without, "对照组：不保留极值时确实会丢"
 
 
 def test_standalone_page_ids_are_unique(tmp_path: Path) -> None:
@@ -184,7 +212,13 @@ def test_standalone_page_ids_are_unique(tmp_path: Path) -> None:
     result = static_site.compute_preset(con, _spec("solo"))
     con.close()
 
-    html = static_site.render_preset_page(result)
+    figs: dict = {}
+    dashboard = static_site.render_dashboard(result, prefix=f"{result['key']}-", figs=figs)
+    html = static_site.render_preset_page(result, dashboard=dashboard)
+
     ids = re.findall(r'id="([^"]+)"', html)
     assert len(ids) == len(set(ids))
     assert 'id="solo-fig-nav"' in html
+    # 独立页要自己装载数据文件
+    assert 'data/solo.figs.js' in html
+    assert 'assets/lab.js' in html
