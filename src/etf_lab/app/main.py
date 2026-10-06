@@ -43,6 +43,8 @@ from nicegui import app, ui
 from etf_lab import __version__, universe
 from etf_lab.content import teaching
 from etf_lab.core import dca as dca_core
+from etf_lab.core import returns as returns_core
+from etf_lab.core import synthetic as synthetic_core
 from etf_lab.data import repo
 from etf_lab.presets import PRESETS, PRESETS_BY_KEY
 from etf_lab.reports import figures, insights as insights_mod, static_site
@@ -82,6 +84,74 @@ def _storage_secret() -> str:
 
 def _current_user() -> str | None:
     return app.storage.user.get("username")
+
+
+def _collect_dca(controls: Mapping[str, Any], param_inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """把界面控件收成定投设置。
+
+    **只收当前模式真正用得到的参数**：否则存档里会混进一堆与所选模式无关的值，
+    下次载入时看起来"参数变了"，其实是上一模式残留的。
+    """
+    mode = str(controls["mode"].value or "fixed")
+    wanted = {spec[0] for spec in dca_core.PARAM_SPECS.get(mode, ())}
+    params = {
+        name: float(widget.value)
+        for name, widget in param_inputs.items()
+        if name in wanted and widget.value is not None
+    }
+    day = controls["day"].value
+    return {
+        "amount": float(controls["amount"].value or 2000.0),
+        "freq": str(controls["freq"].value or "monthly"),
+        "day": int(day) if day else None,
+        "mode": mode,
+        "params": params,
+    }
+
+
+def _collect_rebalance(controls: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "policy": str(controls["policy"].value or "daily"),
+        "threshold": float(controls["threshold"].value or 0.05),
+        "cost_bps": float(controls["cost_bps"].value or 0.0),
+    }
+
+
+def _collect_cash(controls: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "usd_annual_rate": float(controls["usd_rate"].value or 0.0),
+        "cash_tenor": "CN1Y",
+    }
+
+
+def _apply_definition(
+    definition: Mapping[str, Any], controls: Mapping[str, Any], param_inputs: Mapping[str, Any]
+) -> None:
+    """把保存的组合设置填回控件（只预填，不自动计算）。"""
+    dca_payload = dict(definition.get("dca") or {})
+    if dca_payload.get("amount"):
+        controls["amount"].value = float(dca_payload["amount"])
+    if dca_payload.get("freq") in dca_core.FREQ_LABELS:
+        controls["freq"].value = dca_payload["freq"]
+    if dca_payload.get("day"):
+        controls["day"].value = int(dca_payload["day"])
+    if dca_payload.get("mode") in dca_core.MODES:
+        # 赋值会触发参数显示逻辑（on_value_change），参数框随模式同步
+        controls["mode"].value = dca_payload["mode"]
+    for name, value in (dca_payload.get("params") or {}).items():
+        if name in param_inputs and value is not None:
+            param_inputs[name].value = float(value)
+
+    rebalance_payload = dict(definition.get("rebalance") or {})
+    if rebalance_payload.get("policy") in returns_core.REBALANCE_POLICIES:
+        controls["policy"].value = rebalance_payload["policy"]
+    for key in ("threshold", "cost_bps"):
+        if rebalance_payload.get(key) is not None:
+            controls[key].value = float(rebalance_payload[key])
+
+    cash_payload = dict(definition.get("cash") or {})
+    if cash_payload.get("usd_annual_rate") is not None:
+        controls["usd_rate"].value = float(cash_payload["usd_annual_rate"])
 
 
 def _user_header() -> None:
@@ -408,7 +478,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                 ui.label(f"计算失败：{type(exc).__name__}: {exc}").classes("warn")
                 ui.label("请先采集数据：python -m etf_lab.cli fetch --preset core").classes("muted")
 
-    def _save_controls(symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input) -> None:
+    def _save_controls(sliders, controls, param_inputs) -> None:
         """保存组合——**唯一需要登录的功能**。
 
         没登录时这里只显示一句说明与链接，而不是把实验室锁起来。
@@ -423,25 +493,19 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
             name_input = ui.input("组合名称", value="我的组合").classes("w-64")
 
             def save() -> None:
-                raw = {s: float(sliders[s].value or 0) for s in symbols}
+                raw = {s: float(sliders[s].value or 0) for s in sliders}
                 total = sum(raw.values())
                 if total <= 0:
                     ui.notify("权重之和不能为 0", type="warning")
                     return
                 weights = {s: v / total for s, v in raw.items() if v > 0}
-                mode = str(mode_select.value)
-                params: dict[str, float] = {}
-                if mode == "target_vol":
-                    params["target_vol"] = float(target_vol_input.value or 0.15)
-                elif mode == "take_profit":
-                    params["take_profit"] = float(take_profit_input.value or 0.30)
+                # 权重、定投、再平衡、现金假设**全部**存下来：
+                # 只存一部分会让"打开后重算"得到与保存时不同的数字。
                 definition = {
                     "weights": weights,
-                    "dca": {
-                        "amount": float(amount_input.value or 2000),
-                        "mode": mode,
-                        "params": params,
-                    },
+                    "dca": _collect_dca(controls, param_inputs),
+                    "rebalance": _collect_rebalance(controls),
+                    "cash": _collect_cash(controls),
                 }
                 con = repo.connect_users(_users_path(db_path))
                 try:
@@ -455,8 +519,8 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
 
             ui.button("保存", on_click=save)
             ui.label(
-                "只保存权重与定投计划，**不保存计算结果**——结果随数据版本变化，"
-                "存下来只会变成过期数字。"
+                "保存权重、定投设置、再平衡规则与现金假设，**但不保存计算结果**——"
+                "结果随数据版本变化，存下来只会变成过期数字。"
             ).classes("muted")
 
     @ui.page("/lab")
@@ -492,9 +556,28 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
         amounts: dict[str, Any] = {}
         sliders: dict[str, Any] = {}
         output = ui.column().classes("w-full")
+
+        # 合成资产（现金/美元）也进可配列表：它们不是 ETF，但同样是**仓位**，
+        # 而且是降低波动、承担汇率敞口的主要工具。
+        synthetic_rows = [
+            {
+                "symbol": symbol,
+                "name": info["name"],
+                "asset_class": universe.asset_class_label(info["asset_class"]),
+                "index": "",
+                "t_plus": None,
+                "cross": symbol == synthetic_core.USD_SYMBOL,
+                "note": info["note"],
+            }
+            for symbol, info in synthetic_core.SYNTHETIC_ASSETS.items()
+        ]
+        all_rows = rows + synthetic_rows
+
         with ui.card().classes("w-full"):
-            ui.label(f"可配标的：{len(rows)} 只（全部来自已采集的数据，不做任何硬编码）").classes("muted")
-            for row in rows:
+            ui.label(
+                f"标的权重：{len(all_rows)} 项（{len(rows)} 只已采集 ETF + {len(synthetic_rows)} 项现金类）"
+            ).classes("muted")
+            for row in all_rows:
                 with ui.row().classes("items-center w-full"):
                     with ui.column().classes("w-64 gap-0"):
                         ui.label(f"{row['symbol']}　{row['name']}")
@@ -505,38 +588,82 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                             detail += "｜跨境"
                         if row["t_plus"] is not None:
                             detail += f"｜T+{int(row['t_plus'])}"
+                        if row.get("note"):
+                            detail += f"｜{row['note']}"
                         ui.label(detail).classes("muted text-xs")
                     sliders[row["symbol"]] = ui.slider(min=0, max=100, step=5, value=0).classes("flex-grow")
                     amounts[row["symbol"]] = ui.label("0%").classes("w-16 text-right")
                     sliders[row["symbol"]].on_value_change(
                         lambda event, s=row["symbol"]: amounts[s].set_text(f"{int(event.value)}%")
                     )
-            with ui.row().classes("items-center gap-4"):
-                amount_input = ui.number("每期定投金额（元）", value=2000, min=100, step=100)
-                # 模式从引擎常量取，界面不再手写子集
-                mode_select = ui.select(
-                    {mode: dca_core.MODE_LABELS[mode] for mode in dca_core.MODES}, value="fixed", label="定投方式"
+            ui.label(
+                "权重自动归一化到 100%；5% 只是滑动步长，**不要求整数份额、也不限制标的个数**。"
+            ).classes("muted")
+
+        controls: dict[str, Any] = {}
+        with ui.card().classes("w-full"):
+            ui.label("定投设置").classes("text-lg")
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                controls["amount"] = ui.number("每期金额（元）", value=2000, min=100, step=100)
+                controls["freq"] = ui.select(
+                    dict(dca_core.FREQ_LABELS), value="monthly", label="频率"
                 )
-                target_vol_input = ui.number("目标波动率", value=0.15, min=0.02, max=1.0, step=0.01, format="%.2f")
-                take_profit_input = ui.number("止盈阈值", value=0.30, min=0.05, max=2.0, step=0.05, format="%.2f")
+                controls["day"] = ui.number("周期内第几个交易日（留空＝首个）", value=None, min=1, max=23, step=1)
+                controls["mode"] = ui.select(
+                    {mode: dca_core.MODE_LABELS[mode] for mode in dca_core.MODES}, value="fixed", label="方式"
+                )
+            # 参数输入框按引擎的参数表生成（去重后每个参数只建一个控件），
+            # 再按当前模式显示/隐藏——避免摆一堆与所选模式无关的输入框。
+            unique_params: dict[str, tuple[float, float, float, float, str]] = {}
+            for specs in dca_core.PARAM_SPECS.values():
+                for name, default, low, high, step, label in specs:
+                    unique_params.setdefault(name, (default, low, high, step, label))
+            param_inputs: dict[str, Any] = {}
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                for name, (default, low, high, step, label) in unique_params.items():
+                    param_inputs[name] = ui.number(label, value=default, min=low, max=high, step=step)
 
             def _sync_mode_params() -> None:
-                """只显示当前模式真正用得到的参数，避免给出一堆无效输入框。"""
-                target_vol_input.set_visibility(str(mode_select.value) == "target_vol")
-                take_profit_input.set_visibility(str(mode_select.value) == "take_profit")
+                wanted = {spec[0] for spec in dca_core.PARAM_SPECS.get(str(controls["mode"].value), ())}
+                for name, widget in param_inputs.items():
+                    widget.set_visibility(name in wanted)
 
-            mode_select.on_value_change(lambda _: _sync_mode_params())
+            controls["mode"].on_value_change(lambda _: _sync_mode_params())
             _sync_mode_params()
-            ui.button(
-                "计算",
-                on_click=lambda: _run_lab(
-                    symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input, db_path, output
-                ),
-            )
+
+        with ui.card().classes("w-full"):
+            ui.label("再平衡设置").classes("text-lg")
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                controls["policy"] = ui.select(
+                    dict(returns_core.REBALANCE_POLICIES), value="daily", label="再平衡规则"
+                )
+                controls["threshold"] = ui.number("偏离阈值（仅阈值规则用）", value=0.05, min=0.01, max=1.0, step=0.01)
+                controls["cost_bps"] = ui.number("单边交易成本（bp）", value=0.0, min=0.0, max=100.0, step=1.0)
+
+            def _sync_policy() -> None:
+                controls["threshold"].set_visibility(str(controls["policy"].value) == "threshold")
+
+            controls["policy"].on_value_change(lambda _: _sync_policy())
+            _sync_policy()
             ui.label(
-                "权重自动归一化到 100%；不设整数约束，5% 只是滑动步长。"
-                "「现金/空仓」目前不在资产列表里——计算路径假定资金全部投在标的上。"
+                "规则影响的是**权重漂移**：每天归位＝恒定权重；从不归位＝让赢家跑。"
+                "成本只在你再平衡时发生，所以「多久调一次」是一个真实的权衡。"
             ).classes("muted")
+
+        with ui.card().classes("w-full"):
+            ui.label("现金与美元").classes("text-lg")
+            with ui.row().classes("items-center gap-4 flex-wrap"):
+                controls["usd_rate"] = ui.number(
+                    "美元年化利率假设（0＝不生息）", value=0.0, min=0.0, max=0.10, step=0.005, format="%.3f"
+                )
+            ui.label(
+                "人民币现金按国债曲线短端逐日计息（利率数据从 2015 年起，含现金会把样本推到那之后）；"
+                "美元现金 = 汇率变动 + 上面的利率假设。"
+                "**默认不生息**：美债利率历史只有近 4 年，套用当前利率会系统性高估 2012–2021 年，"
+                "因此这里默认不叠加，意味着它**低估**了持有美元的实际收益。"
+            ).classes("muted")
+
+        ui.button("计算", on_click=lambda: _run_lab(sliders, controls, param_inputs, db_path, output))
 
         # 从「我的组合」带过来的定义：只用于预填，不自动计算
         # （自动算会让页面在打开瞬间就跑一次重计算，而用户可能只是想改一改）
@@ -547,39 +674,25 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                     percent = int(round(float(weight) * 100))
                     sliders[symbol].value = percent
                     amounts[symbol].set_text(f"{percent}%")
-            dca = loaded.get("dca") or {}
-            if dca.get("amount"):
-                amount_input.value = float(dca["amount"])
-            if dca.get("mode") in dca_core.MODES:
-                mode_select.value = dca["mode"]
-                saved_params = dca.get("params") or {}
-                if saved_params.get("target_vol"):
-                    target_vol_input.value = float(saved_params["target_vol"])
-                if saved_params.get("take_profit"):
-                    take_profit_input.value = float(saved_params["take_profit"])
-            ui.label("已载入你保存的组合权重与定投设置，点「计算」即可重算。").classes("muted")
+            _apply_definition(loaded, controls, param_inputs)
+            ui.label("已载入你保存的组合设置，点「计算」即可重算。").classes("muted")
         elif symbols:
             # 给个合理初值，让人一进来就能点"计算"看到东西
             sliders[symbols[0]].value = 100
             amounts[symbols[0]].set_text("100%")
 
-        _save_controls(symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input)
+        _save_controls(sliders, controls, param_inputs)
 
-    async def _run_lab(
-        symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input, db_path, output
-    ) -> None:
-        raw = {s: float(sliders[s].value or 0) for s in symbols}
+    async def _run_lab(sliders, controls, param_inputs, db_path, output) -> None:
+        raw = {s: float(sliders[s].value or 0) for s in sliders}
         total = sum(raw.values())
         if total <= 0:
             ui.notify("权重之和不能为 0", type="warning")
             return
         weights = {s: v / total for s, v in raw.items() if v > 0}
-        mode = str(mode_select.value)
-        params: dict[str, float] = {}
-        if mode == "target_vol":
-            params["target_vol"] = float(target_vol_input.value or 0.15)
-        elif mode == "take_profit":
-            params["take_profit"] = float(take_profit_input.value or 0.30)
+        dca_payload = _collect_dca(controls, param_inputs)
+        rebalance_payload = _collect_rebalance(controls)
+        cash_payload = {"usd_annual_rate": float(controls["usd_rate"].value or 0.0), "cash_tenor": "CN1Y"}
         output.clear()
         with output:
             spinner = ui.spinner(size="lg")
@@ -587,18 +700,20 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                 outcome = await run_heavy(
                     compute_custom_job,
                     weights,
-                    float(amount_input.value or 2000),
-                    mode,
+                    dca_payload,
+                    rebalance_payload,
+                    cash_payload,
                     _db_path(db_path),
-                    None,
-                    params,
                 )
                 spinner.delete()
                 _render_result(outcome.value)
                 names = outcome.value.get("names") or {}
+                rebalance_label = returns_core.REBALANCE_POLICIES.get(str(rebalance_payload["policy"]), "")
                 ui.label(
-                    f"本次结果来源：{outcome.via}｜定投方式：{dca_core.MODE_LABELS.get(mode, mode)}｜"
-                    + "权重（已归一化）："
+                    f"本次结果来源：{outcome.via}｜定投：{dca_core.MODE_LABELS.get(dca_payload['mode'], '')}"
+                    f"（{dca_core.FREQ_LABELS.get(dca_payload['freq'], '')}）"
+                    f"｜再平衡：{rebalance_label}"
+                    + "｜权重（已归一化）："
                     + "、".join(f"{names.get(s, s)} {w:.1%}" for s, w in weights.items())
                 ).classes("muted")
                 if outcome.note:

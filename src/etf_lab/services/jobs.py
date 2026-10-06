@@ -41,35 +41,40 @@ def compute_preset_job(spec_key: str, db_path: str | None = None, rf_annual: flo
 
 def compute_custom_job(
     weights: Mapping[str, float],
-    dca_amount: float = 2000.0,
-    dca_mode: str = "fixed",
+    dca: Mapping[str, Any] | None = None,
+    rebalance: Mapping[str, Any] | None = None,
+    cash: Mapping[str, Any] | None = None,
     db_path: str | None = None,
-    rf_annual: float | None = None,
-    dca_params: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """计算用户自定义权重的组合：复用与示例组合**完全相同**的计算路径。
 
     这一点很重要——实验室页面与示例页面如果走两套代码，数字就会不一致，
     那时"教学"反而变成了误导。
+
+    参数用字典而不是一长串位置参数：选项会越来越多（定投 9 个参数、再平衡 3 个、
+    现金 2 个），位置参数一多没人记得住顺序，而 pickle 传字典没有任何代价。
     """
     from etf_lab.data import repo
     from etf_lab.reports.static_site import compute_preset
 
+    dca_payload = dict(dca or {})
     spec = PortfolioSpec(
         key="custom",
         name="自定义组合",
         question="你调整权重后，风险与收益各自变成了什么？",
         weights={k: float(v) for k, v in weights.items() if float(v) > 0},
         dca={
-            "amount": float(dca_amount),
-            "freq": "monthly",
-            "mode": dca_mode,
-            "day": None,
-            "params": dict(dca_params or {}),
+            "amount": float(dca_payload.get("amount") or 2000.0),
+            "freq": str(dca_payload.get("freq") or "monthly"),
+            "mode": str(dca_payload.get("mode") or "fixed"),
+            "day": dca_payload.get("day"),
+            "params": dict(dca_payload.get("params") or {}),
         },
+        rebalance=dict(rebalance or {}),
+        cash=dict(cash or {}),
     )
     con = repo.connect(db_path, read_only=True)
     try:
-        return compute_preset(con, spec, rf_annual=rf_annual)
+        return compute_preset(con, spec)
     finally:
         con.close()

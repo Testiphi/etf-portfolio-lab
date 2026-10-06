@@ -159,14 +159,25 @@ def _seed_db(path: Path) -> None:
     con.close()
 
 
-def _spec(key: str, *, include_bond: bool = True, dca: dict | None = None) -> PortfolioSpec:
-    weights = {"AAA": 0.6, "BBB": 0.4} if include_bond else {"AAA": 1.0}
+def _spec(
+    key: str,
+    *,
+    include_bond: bool = True,
+    dca: dict | None = None,
+    weights: dict | None = None,
+    rebalance: dict | None = None,
+    cash: dict | None = None,
+) -> PortfolioSpec:
+    if weights is None:
+        weights = {"AAA": 0.6, "BBB": 0.4} if include_bond else {"AAA": 1.0}
     return PortfolioSpec(
         key=key,
         name=f"组合{key}",
         question="测试用组合",
         weights=weights,
         dca=dca if dca is not None else {"amount": 1000.0, "freq": "monthly", "mode": "fixed", "day": None},
+        rebalance=rebalance or {},
+        cash=cash or {},
     )
 
 

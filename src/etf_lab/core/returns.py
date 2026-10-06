@@ -68,6 +68,108 @@ def to_simple(returns: pd.Series | pd.DataFrame, method: Method = "log") -> pd.S
     raise ValueError(f"method 只能是 'log' 或 'simple'，收到 {method!r}")
 
 
+RebalancePolicy = str  # daily / monthly / quarterly / annually / never / threshold
+REBALANCE_POLICIES: dict[str, str] = {
+    "daily": "每日再平衡",
+    "monthly": "每月再平衡",
+    "quarterly": "每季再平衡",
+    "annually": "每年再平衡",
+    "never": "买入持有（从不调整）",
+    "threshold": "偏离阈值触发",
+}
+"""再平衡规则。**界面必须从这里取**，别手写子集。"""
+_PERIOD_FREQ: dict[str, str] = {"monthly": "MS", "quarterly": "QS", "annually": "YS"}
+
+
+def rebalance_dates(index: pd.DatetimeIndex, policy: RebalancePolicy) -> set[pd.Timestamp]:
+    """按规则算出"归位"的日期集合（取每个周期的**第一个交易日**）。"""
+    if len(index) == 0:
+        return set()
+    if policy == "daily":
+        return set(index)
+    if policy == "never":
+        return {index[0]}
+    if policy == "threshold":
+        return set()  # 阈值策略在循环里按偏离度判断，没有固定日期
+    freq = _PERIOD_FREQ.get(policy)
+    if freq is None:
+        raise ValueError(f"未知再平衡规则：{policy!r}；可选 {sorted(REBALANCE_POLICIES)}")
+    grouped = pd.Series(index, index=index).groupby(pd.Grouper(freq=freq))
+    return {group.iloc[0] for _, group in grouped if len(group)}
+
+
+def rebalanced_returns(
+    prices: pd.DataFrame,
+    weights: Mapping[str, float],
+    *,
+    policy: RebalancePolicy = "daily",
+    threshold: float = 0.05,
+    cost_bps: float = 0.0,
+) -> pd.Series:
+    """按给定再平衡规则合成组合**简单收益**。
+
+    做法是"份额漂移 + 定期归位"，而不是直接对收益加权——后者只能表达每日再平衡：
+
+    * 期初按目标权重买入，之后**份额不动**，权重随各标的涨跌自然漂移；
+    * 到归位日（或偏离超过阈值时）把份额调整回目标权重；
+    * 调整时按成交名义额扣 ``cost_bps`` 的交易成本。
+
+    ``policy="daily"`` 与旧的 :func:`portfolio_returns` **逐点等价**（有测试守住），
+    因此默认行为完全没有改变——只是现在可以选择别的规则了。
+
+    **没有考虑**：税、买卖价差随规模扩大、以及"再平衡当日的择时"。
+    """
+    if prices.empty or len(prices) < 2:
+        raise ValueError("价格面板至少需要两个点")
+    columns = list(weights)
+    missing = set(columns) - set(prices.columns)
+    if missing:
+        raise KeyError(f"weights 中存在价格面板里没有的标的：{sorted(missing)}")
+    if not columns:
+        raise ValueError("weights 不能为空")
+
+    matrix = prices[columns].astype(float)
+    if bool(matrix.isna().to_numpy().any()):
+        # 不在这里填充：缺失要显式报告，否则再平衡的份额计算会静默错位
+        raise ValueError("价格面板含缺失值：请先对齐数据，不要在这一层填充")
+    w = np.array([float(weights[c]) for c in columns], dtype=float)
+    total_weight = float(w.sum())
+    if total_weight <= 0:
+        raise ValueError("权重之和必须为正")
+    w = w / total_weight
+
+    index = matrix.index
+    first_prices = matrix.iloc[0].to_numpy(dtype=float)
+    units = w / first_prices
+    total_prev = float((units * first_prices).sum())
+    cost_rate = float(cost_bps) / 10000.0
+    fixed_dates = rebalance_dates(index, policy)
+    is_threshold = policy == "threshold"
+
+    out = np.empty(len(matrix) - 1, dtype=float)
+    for position in range(1, len(matrix)):
+        prices_today = matrix.iloc[position].to_numpy(dtype=float)
+        value = units * prices_today
+        total = float(value.sum())
+
+        # 归位发生在**当日收盘**，成本算进**当日**收益。
+        # 一个容易写错的地方：如果把成本留到次日，它在"当日收益 = 加权价格比"里会被
+        # 整个约掉（因为 units 每天从当前总价值重算），实测扣 0bp 与扣 50bp 结果一模一样。
+        # 成本必须直接减少当天的总价值，才能真的反映到净值上。
+        if index[position] in fixed_dates or is_threshold:
+            drift = float(np.max(np.abs(value / total - w))) if total > 0 else 0.0
+            if index[position] in fixed_dates or drift > float(threshold):
+                target_value = total * w
+                traded = float(np.abs(target_value - value).sum())
+                total -= traded * cost_rate
+                units = (total * w) / prices_today
+
+        out[position - 1] = total / total_prev - 1.0
+        total_prev = total
+
+    return pd.Series(out, index=index[1:], name="portfolio")
+
+
 def portfolio_returns(
     returns: pd.Series | pd.DataFrame,
     weights: Mapping[str, float] | None = None,
@@ -137,25 +239,34 @@ def nav_from_prices(
     weights: Mapping[str, float] | None = None,
     method: Method = "simple",
     base: float = 1.0,
+    *,
+    policy: RebalancePolicy = "daily",
+    threshold: float = 0.05,
+    cost_bps: float = 0.0,
 ) -> pd.Series:
     """价格面板 → 净值曲线，**首点等于 ``base``**。
 
     这是报告层应当使用的入口：因为价格比收益多一个观测点，
     首点可以直接作为起点，于是 ``metrics.total_return(nav)``
     与"区间累计收益"完全一致，不会漏掉第一期的涨跌。
+
+    ``policy`` 决定再平衡规则，默认 ``daily`` 即"每日回到目标权重"——
+    与历史上唯一的行为完全一致（有测试守住），因此旧调用不受影响。
     """
     _validate_ascending(prices, "prices")
     if len(prices) < 2:
         raise ValueError("价格序列至少需要两个点")
-    rets = to_returns(prices, method=method)
-    if isinstance(rets, pd.Series):
+    if isinstance(prices, pd.Series):
+        rets = to_returns(prices, method=method)
         simple = to_simple(rets, method=method)
         if weights:
             if len(weights) != 1:
                 raise ValueError("单列价格只接受一个权重")
             simple = simple * float(next(iter(weights.values())))
     else:
-        simple = to_simple(portfolio_returns(rets, weights=weights, method=method), method=method)
+        simple = rebalanced_returns(
+            prices, weights or {}, policy=policy, threshold=threshold, cost_bps=cost_bps
+        )
     growth = (1.0 + simple).cumprod()
     curve = pd.concat([pd.Series([base], index=prices.index[:1], dtype=float), base * growth])
     curve.name = "nav"

@@ -381,7 +381,49 @@ def fetch_bond_yields(
             source=result.source,
         )
     ]
-    _bump_version(con, reports, source=f"bond_yield({result.source})", notes="国债券收益率曲线")
+    _bump_version(con, reports, source=f"bond_yield({result.source})", notes="国债收益率曲线")
+    return reports
+
+
+# --------------------------------------------------------------------------- #
+# 汇率
+# --------------------------------------------------------------------------- #
+def fetch_fx_rates(
+    con,
+    pairs: Iterable[str] = ("USDCNY",),
+    start: str | dt.date = "2012-01-01",
+    end: str | dt.date | None = None,
+) -> list[FetchReport]:
+    """抓取汇率（**央行中间价**）写入 ``fx_rate``。
+
+    用中间价而不是中行牌价：牌价含买卖价差，拿它算收益会把价差当成汇率波动。
+    它是"跨境资产收益拆分"（标的涨跌 + 汇率变动）的基础数据，也是美元现金资产的唯一价格来源。
+    """
+    from etf_lab.etl import fx as fx_client
+
+    pair_list = list(pairs)
+    try:
+        result = fx_client.fetch_rates(pair_list, start=start, end=end)
+    except Exception as exc:  # noqa: BLE001
+        return [FetchReport(target="fx_rate", key=",".join(pair_list), ok=False, error=f"{type(exc).__name__}: {exc}")]
+
+    frame = result.frame.copy()
+    rows = repo.upsert(con, "fx_rate", frame, ["pair", "date", "close"])
+    reports = [
+        FetchReport(
+            target="fx_rate",
+            key=pair,
+            ok=True,
+            name=pair,
+            rows=int((frame["pair"] == pair).sum()),
+            start=str(frame.loc[frame["pair"] == pair, "date"].min().date()),
+            end=str(frame.loc[frame["pair"] == pair, "date"].max().date()),
+            source=result.source,
+        )
+        for pair in pair_list
+        if (frame["pair"] == pair).any()
+    ]
+    _bump_version(con, reports, source=f"fx({result.source})", notes=f"fx_rate: {', '.join(pair_list)} 共 {rows} 行")
     return reports
 
 
@@ -391,7 +433,7 @@ def fetch_bond_yields(
 PENDING_SOURCES: tuple[str, ...] = (
     "future_daily（股指期货基差/展期）：尚未接入",
     "option_daily（ETF 期权与隐含波动率）：尚未接入",
-    "fx_rate（汇率）：跨境 ETF 的汇率贡献待接入",
+    "美元利率历史（新浪美债接口只有近 4 年，不足以支撑跨周期的美元现金计息）",
 )
 def probe_sources() -> list[dict[str, Any]]:
     """探测各源在当前网络环境下是否可用（M0 证伪步骤）。"""

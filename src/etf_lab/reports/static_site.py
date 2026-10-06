@@ -27,7 +27,7 @@ import pandas as pd
 from etf_lab import __version__, universe
 from etf_lab.content import teaching
 from etf_lab.content.episodes import EPISODES
-from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, hedge as hedge_mod, metrics, rates as rates_mod, returns, simulate as simulate_mod
+from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, hedge as hedge_mod, metrics, rates as rates_mod, returns, simulate as simulate_mod, synthetic as synthetic_mod
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
@@ -98,6 +98,8 @@ def _exposure_block(
     weights: Mapping[str, float],
     start: Any,
     name_by_symbol: Mapping[str, str],
+    *,
+    skip_symbols: Sequence[str] = (),
 ) -> dict[str, Any]:
     """因子敞口矩阵：对每只标的与整个组合各做一次 RBSA。"""
     try:
@@ -112,13 +114,113 @@ def _exposure_block(
         factor_returns = returns.to_returns(index_panel, method="simple")
         factor_returns = factor_returns.rename(columns=dict(EXPOSURE_FACTORS))
         asset_returns = returns.to_returns(aligned_prices, method="simple")
-        matrix = exposure_mod.exposure_matrix(asset_returns, weights, factor_returns)
+        matrix = exposure_mod.exposure_matrix(
+            asset_returns, weights, factor_returns, skip_symbols=skip_symbols
+        )
         for row in matrix["rows"]:
             row["name"] = "组合" if row["key"] == "__portfolio__" else name_by_symbol.get(row["key"], row["key"])
         matrix["factor_labels"] = {label: label for _, label in EXPOSURE_FACTORS}
         return matrix
     except Exception:  # noqa: BLE001 - 敞口算不出来不应影响其它面板
         return {}
+
+
+def _synthetic_only_index(curve: pd.DataFrame | None, fx: pd.DataFrame | None) -> pd.DatetimeIndex:
+    """全部由合成资产构成组合时的交易日索引（取各数据源日期的交集）。
+
+    这种组合（例如"50% 现金 + 50% 美元"）在数据上仍然有意义，
+    但要用两个数据源都有值的日子，不能拿其中一个的日期外推另一个。
+    """
+    frames: list[set[pd.Timestamp]] = []
+    if curve is not None and not curve.empty:
+        frames.append(set(pd.to_datetime(curve["date"])))
+    if fx is not None and not fx.empty:
+        frames.append(set(pd.to_datetime(fx["date"])))
+    if not frames:
+        raise RuntimeError("没有收益率曲线与汇率数据，无法构造纯现金组合")
+    common = set.intersection(*frames) if len(frames) > 1 else frames[0]
+    if not common:
+        raise RuntimeError("收益率曲线与汇率的日期没有交集，无法构造纯现金组合")
+    return pd.DatetimeIndex(sorted(common))
+
+
+def _rebalance_block(
+    aligned: pd.DataFrame,
+    weights: Mapping[str, float],
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    """再平衡规则的**实际影响**：同一份价格面板，换规则看结果差多少。
+
+    必须把它算出来而不是只给一个下拉框——"多久再平衡一次"这件事，
+    只有把不同规则的结果并排摆出来才有意义。
+    """
+    try:
+        current = str(options.get("policy") or "daily")
+        threshold = float(options.get("threshold") or 0.05)
+        cost_bps = float(options.get("cost_bps") or 0.0)
+        rows: list[dict[str, Any]] = []
+        for policy, label in returns.REBALANCE_POLICIES.items():
+            nav = returns.nav_from_prices(
+                aligned, weights=weights, policy=policy, threshold=threshold, cost_bps=cost_bps
+            )
+            if len(nav) < 60:
+                continue
+            rows.append(
+                {
+                    "policy": policy,
+                    "label": label,
+                    "is_current": policy == current,
+                    "annualized": round(float(metrics.annualized_return(nav)), 6),
+                    "volatility": round(float(metrics.annualized_volatility(nav.pct_change().dropna())), 6),
+                    "max_drawdown": round(float(metrics.max_drawdown(nav).depth), 6),
+                    "total_return": round(float(metrics.total_return(nav)), 6),
+                }
+            )
+        if not rows:
+            return {}
+        best = max(rows, key=lambda row: row["annualized"])
+        return {
+            "rows": rows,
+            "policy": current,
+            "threshold": threshold,
+            "cost_bps": cost_bps,
+            "best_policy": best["policy"],
+            "has_cost": cost_bps > 0,
+            "note": (
+                "同一份价格、同一个权重，只换再平衡规则。规则影响的是**权重漂移**："
+                "每天归位 = 恒定权重；从不归位 = 让赢家跑（收益更高但集中度也更高）。"
+                + ("" if cost_bps > 0 else "当前交易成本设为 0——现实中越频繁再平衡成本越高，把成本调大再看这张表。")
+            ),
+        }
+    except Exception:  # noqa: BLE001 - 规则对比算不出来不应影响其它面板
+        return {}
+
+
+def _rebalance_table(result: Mapping[str, Any]) -> str:
+    block = result.get("rebalance") or {}
+    rows = block.get("rows") or []
+    if not rows:
+        return "<p class='note'>再平衡对比需要足够长的样本。</p>"
+    body = ""
+    for row in rows:
+        mark = " ★" if row["is_current"] else ""
+        highlight = "ok" if row["policy"] == block.get("best_policy") else ""
+        body += (
+            f'<tr><td>{theme.esc(row["label"])}{mark}</td>'
+            f'<td class="{highlight}">{theme.pct(row["annualized"])}</td>'
+            f'<td>{theme.pct(row["volatility"])}</td>'
+            f'<td class="warn">{theme.pct(row["max_drawdown"])}</td>'
+            f'<td>{theme.pct(row["total_return"])}</td></tr>'
+        )
+    cost = block.get("cost_bps") or 0.0
+    return (
+        f'<p class="note">当前规则：<b>{theme.esc(returns.REBALANCE_POLICIES.get(str(block.get("policy")), ""))}</b>'
+        f'（偏离阈值 {theme.pct(block.get("threshold"))}，单边成本 {cost:.0f} bp）。'
+        "★ = 当前选择，绿色 = 本区间年化最高。</p>"
+        "<table><thead><tr><th>再平衡规则</th><th>年化</th><th>波动</th><th>最大回撤</th><th>累计</th></tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+        f'<p class="note">{theme.esc(block.get("note", ""))}</p>'
+    )
 
 
 def _episodes_block(result: Mapping[str, Any]) -> str:
@@ -193,6 +295,11 @@ def _exposure_table(result: Mapping[str, Any]) -> str:
         f"{head}<th>R²</th><th>Alpha<br>(年化)</th><th>跟踪误差</th><th>样本</th>"
         "</tr></thead>"
         f"<tbody>{body}</tbody></table>"
+        "<p class='note'><b>怎么读这张表</b>：beta 是<b>归一化到和为 1 的相对权重</b>"
+        "（约束回归 Σβ=1），**不是风险倍数**。所以持有现金不会让 beta 变小——"
+        "现金的效果体现在波动率与最大回撤上，不在 beta 里。"
+        "这也意味着约束回归<b>无法表达组合的波动尺度</b>：把仓位整体减半，beta 几乎不变，"
+        "变的是 R² 与跟踪误差。判断「风险有多大」要看上面的波动与回撤，不要看 beta。</p>"
         f"<p class='note'>{theme.esc(block.get('note', ''))}</p>"
         f"{warn_html}"
     )
@@ -756,25 +863,90 @@ def compute_preset(
     ``RF_ANNUAL_DEFAULT`` 假设值，并在结果里标明来源是曲线还是假设。
     """
     symbols = list(spec.weights)
-    panel = repo.read_price_panel(con, symbols, start=start, field="close_adj")
-    if panel.empty:
-        raise RuntimeError(f"组合 {spec.key} 的标在库中没有数据，请先运行：etf-lab fetch --preset core")
+    synthetic_symbols = [s for s in symbols if s in synthetic_mod.SYNTHETIC_ASSETS]
+    real_symbols = [s for s in symbols if s not in synthetic_mod.SYNTHETIC_ASSETS]
 
-    missing = [s for s in symbols if s not in panel.columns]
-    if missing:
-        raise RuntimeError(f"组合 {spec.key} 缺少标的 {missing} 的价格数据")
+    # 曲线与汇率必须在构造合成资产**之前**读到：
+    # 人民币现金按曲线短端计息、美元现金用汇率序列，缺数据时明确报错而不是拿假设顶替。
+    try:
+        curve = repo.read_bond_yield(con)
+    except Exception:  # noqa: BLE001 - 缺曲线不应影响其它面板
+        curve = None
+    fx_frame = None
+    if synthetic_mod.USD_SYMBOL in synthetic_symbols:
+        try:
+            fx_frame = repo.read_fx_rate(con)
+        except Exception:  # noqa: BLE001
+            fx_frame = None
+    cash_options = dict(spec.cash or {})
+    usd_annual_rate = float(cash_options.get("usd_annual_rate") or 0.0)
+    cash_tenor = str(cash_options.get("cash_tenor") or "CN1Y")
 
-    # 只保留全部标的都有价格的日期：缺失值不做填充（否则会造出不存在的收益）
-    aligned = panel.dropna(how="any")
-    if len(aligned) < 60:
+    panel = pd.DataFrame()
+    if real_symbols:
+        panel = repo.read_price_panel(con, real_symbols, start=start, field="close_adj")
+        if panel.empty:
+            raise RuntimeError(f"组合 {spec.key} 的标在库中没有数据，请先运行：etf-lab fetch --preset core")
+        missing = [s for s in real_symbols if s not in panel.columns]
+        if missing:
+            raise RuntimeError(f"组合 {spec.key} 缺少标的 {missing} 的价格数据")
+        # 只保留全部标的都有价格的日期：缺失值不做填充（否则会造出不存在的收益）
+        aligned = panel.dropna(how="any")
+    else:
+        aligned = None
+
+    start_before_synthetic = str(aligned.index[0].date()) if aligned is not None and len(aligned) else "—"
+    if synthetic_symbols:
+        # 含现金/美元会把样本推到它们的数据起点之后：**自动收缩区间**，
+        # 而不是等构造时报错。收缩这件事必须显示给用户（下面记进 cash 块）。
+        try:
+            required_start = synthetic_mod.required_start(
+                synthetic_symbols, curve=curve, fx=fx_frame, cash_tenor=cash_tenor
+            )
+        except synthetic_mod.SyntheticError as exc:
+            raise RuntimeError(f"组合 {spec.key}：{exc}") from exc
+        if aligned is not None and required_start is not None:
+            trimmed = aligned.index < required_start
+            if bool(trimmed.any()):
+                aligned = aligned.loc[~trimmed]
+        index = aligned.index if aligned is not None else _synthetic_only_index(curve, fx_frame)
+        synth = synthetic_mod.synthetic_prices(
+            index,
+            symbols=synthetic_symbols,
+            curve=curve,
+            fx=fx_frame,
+            usd_annual_rate=usd_annual_rate,
+            cash_tenor=cash_tenor,
+        )
+        aligned = synth if aligned is None else aligned.join(synth)
+
+    start_used = str(aligned.index[0].date()) if aligned is not None and len(aligned) else start_before_synthetic
+
+    if aligned is None or len(aligned) < 60:
+        count = 0 if aligned is None else len(aligned)
         raise RuntimeError(
-            f"组合 {spec.key} 对齐后仅剩 {len(aligned)} 个交易日，样本不足；"
-            "通常是因为某只 ETF 上市太晚，请改用指数补历史或缩短组合"
+            f"组合 {spec.key} 对齐后仅剩 {count} 个交易日，样本不足；"
+            "通常是因为某只 ETF 上市太晚（或现金/汇率数据的起点更晚），"
+            "请改用指数补历史或缩短组合"
         )
 
-    nav = returns.nav_from_prices(aligned, weights=spec.weights)
+    # 再平衡规则：空字典 = 每日再平衡，与历史行为完全一致。
+    # 默认值**不能悄悄改变已有数字**，所以这里是显式的默认。
+    rebalance_options = dict(spec.rebalance or {})
+    policy = str(rebalance_options.get("policy") or "daily")
+    if policy not in returns.REBALANCE_POLICIES:
+        policy = "daily"
+    threshold = float(rebalance_options.get("threshold") or 0.05)
+    cost_bps = float(rebalance_options.get("cost_bps") or 0.0)
+
+    nav = returns.nav_from_prices(
+        aligned, weights=spec.weights, policy=policy, threshold=threshold, cost_bps=cost_bps
+    )
     drawdown = metrics.drawdown_series(nav)
     rets = returns.to_returns(aligned, method="simple")
+    # 相关性与"标的间关系"的诊断只针对可交易标的：现金的收益近似常数，
+    # 相关系数会是 NaN，混进去只会让诊断挑出无意义的配对。
+    analysis_returns = rets[real_symbols] if real_symbols else rets
 
     # 无风险利率优先取真实国债收益率曲线；没有曲线数据时才退回假设值
     try:
@@ -788,7 +960,7 @@ def compute_preset(
     port_rets.name = "portfolio"
     info = metrics.max_drawdown(nav)
 
-    corr = correlation.correlation_matrix(rets, method="pearson", min_obs=60)
+    corr = correlation.correlation_matrix(analysis_returns, method="pearson", min_obs=60)
     order = correlation.cluster_order(corr)
     corr_ordered = corr.loc[order, order]
 
@@ -800,14 +972,19 @@ def compute_preset(
     risk["rebalancing_effect"] = round(risk["log_total_return"] - risk["log_contribution_sum"], 8)
 
     adjustment_frame = None
-    try:
-        adjustment_frame = repo.read_price_panel(con, symbols, start=start, field="adj_factor")
-    except Exception:  # noqa: BLE001 - 缺 adj_factor 时不阻塞整页
-        adjustment_frame = None
+    if real_symbols:
+        try:
+            adjustment_frame = repo.read_price_panel(con, real_symbols, start=start, field="adj_factor")
+        except Exception:  # noqa: BLE001 - 缺 adj_factor 时不阻塞整页
+            adjustment_frame = None
 
-    diagnostics = _diagnostics(rets, spec.weights, risk["log_contribution"], adjustment_frame, len(aligned))
+    diagnostics = _diagnostics(analysis_returns, spec.weights, risk["log_contribution"], adjustment_frame, len(aligned))
 
-    meta = repo.read_etf_meta(con, symbols)
+    meta = repo.read_etf_meta(con, real_symbols) if real_symbols else pd.DataFrame()
+    # 合成资产（现金/美元）也要有元数据行，"名称（代码 · 板块）"的标签链才能一视同仁
+    synth_meta = synthetic_mod.synthetic_meta(synthetic_symbols)
+    if not synth_meta.empty:
+        meta = pd.concat([meta, synth_meta], ignore_index=True)
     class_by_symbol = dict(zip(meta.get("symbol", []), meta.get("asset_class", []))) if not meta.empty else {}
     # 人读标签只在 universe.label_maps 里生成，界面各处一律用它——
     # 散落手写会让静态站与应用对同一个标的叫法不同。
@@ -818,15 +995,43 @@ def compute_preset(
         by_class[asset_class] = round(by_class.get(asset_class, 0.0) + float(weight), 6)
     composition = {
         "by_asset_class": by_class,
-        **{f"has_{key}": key in by_class for key in ("broad", "bond", "gold", "cross_border", "industry")},
+        **{
+            f"has_{key}": key in by_class
+            for key in ("broad", "bond", "gold", "cross_border", "industry", "cash", "fx_cash")
+        },
     }
 
-    premium = _premium_block(con, symbols, spec.weights, start)
-    exposure_block = _exposure_block(con, aligned, spec.weights, start, name_by_symbol)
+    # 零波动资产（现金/美元）不参与逐标的回归：以近常数序列作被解释变量，
+    # RBSA 会退化成噪声，并打印出一行经济上无意义的「CASH beta」。
+    # **判别必须按"已知的合成符号"，不能用波动率阈值**——国债 ETF 的年化波动只有 0.8%，
+    # 用阈值会把真实的债券持仓一起误杀。
+    #
+    # 说明一句容易想错的事：**组合那一行并不因为跳过而改变**。RBSA 的 beta 是
+    # 归一化到和为 1 的**相对权重**，而且给组合加一条常数序列不改变相关系数，
+    # 所以"把现金剔出去会让组合 beta 被高估"是错的（我一开始就是这么以为的，
+    # 被一条期望 beta≈0.5 的测试直接证伪）。跳过的意义是**别打印无意义的行**，
+    # 不是修正组合数字。现金对组合的真实影响体现在波动率与最大回撤上。
+    degenerate = [
+        str(column)
+        for column in rets.columns
+        if float(rets[column].std(ddof=1)) <= 1e-12
+    ]
+    skip_in_regression = list(dict.fromkeys(list(synthetic_symbols) + degenerate))
+    premium = _premium_block(con, real_symbols, spec.weights, start) if real_symbols else {}
+    exposure_block = _exposure_block(
+        con, aligned, spec.weights, start, name_by_symbol, skip_symbols=skip_in_regression
+    )
     derivatives_block = _derivatives_block(nav, aligned, rf_used)
     hedge_block = _hedge_block(nav, rf_used, derivatives_block)
     monte_carlo_block = _monte_carlo_block(nav, rf_used)
-    rates_block = _rates_block(curve, rate_env, aligned, spec.weights, name_by_symbol)
+    rates_block = _rates_block(
+        curve,
+        rate_env,
+        aligned[real_symbols] if real_symbols else aligned,
+        {k: v for k, v in spec.weights.items() if k in (real_symbols or list(spec.weights))},
+        name_by_symbol,
+    )
+    rebalance_block = _rebalance_block(aligned, spec.weights, rebalance_options)
 
     # 历史情节重放：基准指数可回溯到 2005 年，组合净值则受成分标的上市时间限制
     try:
@@ -935,6 +1140,16 @@ def compute_preset(
         "hedge": hedge_block,
         "monte_carlo": monte_carlo_block,
         "rates": rates_block,
+        "rebalance": rebalance_block,
+        "rebalance_options": dict(returns.REBALANCE_POLICIES),
+        "cash": {
+            "usd_annual_rate": usd_annual_rate,
+            "cash_tenor": cash_tenor,
+            "has_fx_data": fx_frame is not None and not fx_frame.empty,
+            "synthetic_symbols": list(synthetic_symbols),
+            "trimmed_by_synthetic": bool(synthetic_symbols) and start_used != start_before_synthetic,
+            "start_before_synthetic": start_before_synthetic,
+        },
         "episodes": episode_block,
         "diagnostics": diagnostics,
         "max_drawdown_info": {
@@ -1178,6 +1393,7 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     + "</b> 就是<b>再平衡/分散化效应</b>——由 Jensen 不等式它恒为非负："
     + "每日再平衡会在波动中不断把权重拉回目标，从而多得一部分收益。</p>", span=4)}
   {theme.panel("权重 vs 风险贡献", theme.figure_div_for(figures.fig_risk_vs_weight, result, prefix, figs), span=6)}
+  {theme.panel("再平衡规则的影响", _rebalance_table(result), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
   {theme.panel("定投：市值 vs 累计投入", theme.figure_div_for(figures.fig_dca, result, prefix, figs), span=6)}

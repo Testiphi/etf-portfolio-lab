@@ -224,6 +224,17 @@ def read_bond_yield(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return frame
 
 
+def read_fx_rate(con: duckdb.DuckDBPyConnection, pair: str = "USDCNY") -> pd.DataFrame:
+    """读取汇率（央行中间价）。空表返回空 DataFrame，由调用方决定如何降级。"""
+    frame = con.execute(
+        "SELECT pair, date, close FROM fx_rate WHERE pair = ? AND close IS NOT NULL ORDER BY date", [pair]
+    ).df()
+    if frame.empty:
+        return pd.DataFrame(columns=["pair", "date", "close"])
+    frame["date"] = pd.to_datetime(frame["date"])
+    return frame
+
+
 def table_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
     """各表行数——用于页面上的"数据底座"展示与断供排查。"""
     tables = [

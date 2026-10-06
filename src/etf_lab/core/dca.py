@@ -37,6 +37,35 @@ MODE_LABELS: dict[str, str] = {
     "take_profit": "达标止盈",
 }
 
+FREQ_LABELS: dict[str, str] = {
+    "daily": "每日",
+    "weekly": "每周",
+    "monthly": "每月",
+    "quarterly": "每季",
+}
+"""定投频率。**界面从这里取**，与 ``DcaPlan`` 允许的取值保持一致。"""
+
+PARAM_SPECS: dict[str, tuple[tuple[str, float, float, float, float, str], ...]] = {
+    # mode -> ((参数名, 默认值, 最小值, 最大值, 步长, 说明), ...)
+    # 界面按这张表生成输入框，**不再手写子集**：引擎支持 9 个参数，
+    # 早期界面只暴露了 2 个，等于把大部分能力藏了起来。
+    "fixed": (("growth", 0.0, 0.0, 0.05, 0.002, "每期金额增长率"),),
+    "value_avg": (("growth", 0.0, 0.0, 0.05, 0.002, "每期金额增长率"),),
+    "target_vol": (
+        ("target_vol", 0.15, 0.02, 1.0, 0.01, "目标年化波动率"),
+        ("return_window", 60.0, 20.0, 250.0, 5.0, "已实现波动窗口（交易日）"),
+        ("min_mult", 0.25, 0.0, 1.0, 0.05, "金额最低倍数"),
+        ("max_mult", 2.0, 1.0, 5.0, 0.1, "金额最高倍数"),
+        ("growth", 0.0, 0.0, 0.05, 0.002, "每期金额增长率"),
+    ),
+    "take_profit": (
+        ("take_profit", 0.30, 0.05, 2.0, 0.05, "止盈阈值"),
+        ("take_fraction", 0.5, 0.1, 1.0, 0.1, "止盈卖出比例"),
+        ("cooldown_days", 20.0, 0.0, 120.0, 5.0, "止盈冷却（交易日）"),
+        ("growth", 0.0, 0.0, 0.05, 0.002, "每期金额增长率"),
+    ),
+}
+
 
 # --------------------------------------------------------------------------- #
 # 参数对象
@@ -396,7 +425,19 @@ def simulate(
         metrics={},
     )
 
-    stats = metrics.summary(value_curve, rf_annual=rf_annual) if len(value_curve) >= 2 else {}
+    # 定投市值曲线在**第一笔投入之前是 0**，那不是净值（净值首值必须为正）。
+    # 把整条曲线直接交给 metrics.summary，会在"第一笔不落在序列第一天"时抛
+    # 「净值首值必须为正」——例如把 day 设成 3。这个坑一直存在，只是界面此前
+    # 没有暴露 day 参数，所以没人踩到；**暴露选项会把潜伏的缺陷一起暴露出来**。
+    # 只对"已开始投入"之后的区间做统计：在此之前组合还不存在。
+    invested_flags = np.asarray(invested_series, dtype=float) > 0
+    start_at = int(np.argmax(invested_flags)) if invested_flags.any() else 0
+    valued = value_curve.iloc[start_at:] if invested_flags.any() else value_curve
+    stats = (
+        metrics.summary(valued, rf_annual=rf_annual)
+        if len(valued) >= 2 and float(valued.iloc[0]) > 0
+        else {}
+    )
     stats.update(
         {
             "invested_total": result.invested_total,

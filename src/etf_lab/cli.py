@@ -47,6 +47,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         reports += fetch.fetch_fund_nav(con, start=args.nav_start)
     if args.preset in ("macro", "all"):
         reports += fetch.fetch_bond_yields(con, start=args.start)
+    if args.preset in ("fx", "all"):
+        # 汇率按年分窗、每页 50 行；抓满 2012 年至今约 75 次请求（内置限速）
+        reports += fetch.fetch_fx_rates(con, start=args.start)
+    if args.preset in ("macro", "fx", "all"):
         for pending in fetch.PENDING_SOURCES:
             print(f"[待接入] {pending}")
 
@@ -99,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_probe.set_defaults(func=cmd_probe)
 
     p_fetch = sub.add_parser("fetch", help="采集数据到本地 DuckDB")
-    p_fetch.add_argument("--preset", choices=["core", "nav", "macro", "all"], default="core")
+    p_fetch.add_argument("--preset", choices=["core", "nav", "macro", "fx", "all"], default="core")
     p_fetch.add_argument("--start", default="2012-01-01")
     p_fetch.add_argument("--nav-start", default="2022-01-01", help="净值抓取起点（净值仅用于折溢价）")
     p_fetch.add_argument("--db", default=None)

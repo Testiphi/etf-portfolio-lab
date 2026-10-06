@@ -175,14 +175,21 @@ def exposure_matrix(
     factor_returns: pd.DataFrame,
     *,
     min_obs: int = DEFAULT_MIN_OBS,
+    skip_symbols: Sequence[str] = (),
 ) -> dict[str, Any]:
     """对**每只标的**与**整个组合**各做一次 RBSA，得到敞口矩阵。
 
     返回结构直接可渲染：行是标的（最后一行是组合），列是因子。
     解释不了的标的（样本不足）会被标记出来，而不是悄悄留空。
+
+    ``skip_symbols`` 用于**近常数资产**（现金、外币现金）：以它们为被解释变量做 RBSA
+    会退化成噪声，并打印出一行经济上无意义的敞口。注意**组合那一行不受影响**——
+    RBSA 的 beta 是归一化到和为 1 的相对权重，且给组合加常数序列不改变相关系数，
+    所以"跳过现金会修正组合 beta"是错的；跳过的意义只是不打印无意义的行。
     """
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
+    skip_set = {str(symbol) for symbol in skip_symbols}
     collinearity_reported = False
 
     def _register(result: RbsaResult, label: str) -> None:
@@ -195,6 +202,15 @@ def exposure_matrix(
             warnings.append(f"{label}：{result.warning}")
 
     for symbol in panel.columns:
+        if str(symbol) in skip_set:
+            rows.append(
+                {
+                    "key": str(symbol),
+                    "name": str(symbol),
+                    "skipped": "零波动资产（现金类）没有可估的因子敞口，按定义为 0",
+                }
+            )
+            continue
         try:
             result = rbsa(panel[symbol].dropna(), factor_returns, min_obs=min_obs)
         except ValueError as exc:

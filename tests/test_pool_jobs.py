@@ -33,7 +33,13 @@ import json, sys
 sys.path.insert(0, {src!r})
 from etf_lab.services.jobs import compute_custom_job
 
-result = compute_custom_job({{"AAA": 0.6, "BBB": 0.4}}, 1000.0, "fixed", sys.argv[1])
+result = compute_custom_job(
+    {{"AAA": 0.6, "BBB": 0.4}},
+    {{"amount": 1000.0, "freq": "monthly", "mode": "fixed", "day": None, "params": {{}}}},
+    {{"policy": "daily", "threshold": 0.05, "cost_bps": 0.0}},
+    {{"usd_annual_rate": 0.0, "cash_tenor": "CN1Y"}},
+    sys.argv[1],
+)
 Path = __import__("pathlib").Path
 Path(sys.argv[2]).write_text(
     json.dumps({{"annualized": result["metrics"]["annualized_return"], "rf": result["rf_annual"]}}),

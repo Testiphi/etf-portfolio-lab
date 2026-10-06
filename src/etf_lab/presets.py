@@ -26,6 +26,13 @@ class PortfolioSpec:
     """这个组合要回答的教学问题（会显示在页面标题下方）。"""
     weights: Mapping[str, float]
     dca: Mapping[str, Any] = field(default_factory=dict)
+    rebalance: Mapping[str, Any] = field(default_factory=dict)
+    """再平衡规则：``{"policy": daily/monthly/quarterly/annually/never/threshold,
+    "threshold": 0.05, "cost_bps": 0.0}``。
+    空字典表示沿用历史行为（每日再平衡、零成本）——**默认不能悄悄改变已有数字**。"""
+    cash: Mapping[str, Any] = field(default_factory=dict)
+    """合成资产参数：``{"usd_annual_rate": 0.0, "cash_tenor": "CN1Y"}``。
+    美元默认**不生息**：美债利率历史只有近 4 年，叠加当前利率会系统性高估早期年份。"""
     caveat: str = ""
 
     def to_dict(self) -> dict[str, Any]:
