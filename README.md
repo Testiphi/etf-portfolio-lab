@@ -66,7 +66,7 @@ uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels 
 #    未做 editable 安装也能直接跑（下面统一依赖 PYTHONPATH）：
 #    PowerShell:  $env:PYTHONPATH='src'
 
-# 2) 跑数值校验测试（这一步必须全绿，共 223 项）
+# 2) 跑数值校验测试（这一步必须全绿，共 232 项）
 .venv\Scripts\python.exe -m pytest -q
 
 # 3) 采集数据到本地 DuckDB（生成 data/lab.duckdb，已 gitignore）
@@ -127,7 +127,7 @@ src/etf_lab/
 ├── app/           # C 路线：NiceGUI 界面
 ├── services/      # 缓存、进程池封装、可 pickle 的作业函数
 ├── content/       # 教学卡片文案（怎么算/说明什么/何时会误导）
-├── tests/         # 数值对照测试（223 项，含采集解析与防呆）
+├── tests/         # 数值对照测试（232 项，含采集解析与防呆）
 └── cli.py         # 统一命令入口
 ```
 
@@ -169,7 +169,8 @@ src/etf_lab/
 ## 路线图
 
 - [x] M0-1 仓库骨架、契约冻结、`core/` 最小集（收益/指标/定投/相关性）
-- [x] M0-2 多源采集 → DuckDB：7 只 ETF 23,494 行 + 指数 35,157 行 + 基金净值 11,529 行 + 国债收益率 23,496 行
+- [x] M0-2 多源采集 → DuckDB：**10 只 ETF** 29,754 行 + 指数 35,157 行 + 基金净值 11,529 行 + 国债收益率 23,496 行
+      （宽基含沪深300/中证500/中证1000/创业板/红利，债券含短久期与十年期，另有跨境与黄金）
 - [x] A-1 静态站生成器 + 三个示例组合 + 概念页 + 口径页（`docs/`），已上线 GitHub Pages
 - [x] C-1 NiceGUI 应用 + 进程池 + 缓存骨架（实测 `cpu_bound` 生效）
 - [x] B-1 Pyodide 可行性评估（结论见 [ARCHITECTURE.md](ARCHITECTURE.md) §5）
