@@ -152,6 +152,21 @@ def verify_against_sohu(
 # --------------------------------------------------------------------------- #
 # ETF
 # --------------------------------------------------------------------------- #
+def _bump_version(con, reports: Sequence[FetchReport], *, source: str, notes: str) -> str | None:
+    """写完行情后记一个新的数据版本；没有任何成功项时不动版本。
+
+    **为什么记账要放在 ETL 自身，而不是交给调用方**
+    ----------------------------------------------
+    应用的缓存键是「组合 | 数据版本」。版本不变，就会把**旧数据算出的结果**当成新的用——
+    页面照常显示，数字却是过期的。CLI 原本是唯一记账的地方，于是任何直接调用
+    ``fetch_*`` 的脚本（我自己就踩过）都会漏掉这一步，而漏掉是**静默**的。
+    把记账收进 ETL 后，"任何成功写入都伴随一次版本递增"这条不变量由构造保证。
+    """
+    if not any(report.ok for report in reports):
+        return None
+    return repo.log_data_version(con, source=source, notes=notes)
+
+
 def fetch_etf_prices(
     con,
     symbols: Iterable[str] | None = None,
@@ -233,6 +248,7 @@ def fetch_etf_prices(
                 "notes",
             ],
         )
+    _bump_version(con, reports, source="tencent+sohu(verify)", notes=f"etf_price: {len([r for r in reports if r.ok])} 只标的")
     return reports
 
 
@@ -276,6 +292,7 @@ def fetch_index_prices(
                 )
             except Exception as exc:  # noqa: BLE001
                 reports.append(FetchReport(target="index_price", key=code, ok=False, error=f"{type(exc).__name__}: {exc}"))
+    _bump_version(con, reports, source="tencent", notes=f"index_price: {len([r for r in reports if r.ok])} 个指数")
     return reports
 
 
@@ -325,6 +342,7 @@ def fetch_fund_nav(
                 )
             except Exception as exc:  # noqa: BLE001
                 reports.append(FetchReport(target="fund_nav", key=code, ok=False, error=f"{type(exc).__name__}: {exc}"))
+    _bump_version(con, reports, source="eastmoney+sina", notes=f"fund_nav: {len([r for r in reports if r.ok])} 只基金")
     return reports
 
 
@@ -351,7 +369,7 @@ def fetch_bond_yields(
     frame = result.frame.copy()
     rows = repo.upsert(con, "bond_yield", frame, ["date", "code", "tenor", "yield"])
     codes = sorted(frame["code"].unique())
-    return [
+    reports = [
         FetchReport(
             target="bond_yield",
             key="curve",
@@ -363,6 +381,8 @@ def fetch_bond_yields(
             source=result.source,
         )
     ]
+    _bump_version(con, reports, source=f"bond_yield({result.source})", notes="国债券收益率曲线")
+    return reports
 
 
 # --------------------------------------------------------------------------- #

@@ -55,7 +55,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     _print_json(fetch.report_to_dicts(reports))
     counts = repo.table_counts(con)
     print("\n数据底座：", json.dumps(counts, ensure_ascii=False))
-    version = repo.log_data_version(con, source="tencent+sohu(verify)", notes=f"preset={args.preset}, start={args.start}")
+    # 版本号由 ETL 自己记（见 fetch._bump_version）：任何成功写入都会递增，
+    # 这样直接调用 fetch_* 的脚本也不会漏掉——漏掉的后果是应用把旧结果当新结果用。
+    version = repo.latest_data_version(con)
     print(f"data_version = {version}")
     if warned:
         print(f"\n有 {len(warned)} 项未通过交叉校验（见 quality.warning）", file=sys.stderr)

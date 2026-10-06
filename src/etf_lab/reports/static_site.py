@@ -24,7 +24,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from etf_lab import __version__
+from etf_lab import __version__, universe
 from etf_lab.content import teaching
 from etf_lab.content.episodes import EPISODES
 from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episodes as episodes_mod, exposure as exposure_mod, hedge as hedge_mod, metrics, rates as rates_mod, returns, simulate as simulate_mod
@@ -809,7 +809,9 @@ def compute_preset(
 
     meta = repo.read_etf_meta(con, symbols)
     class_by_symbol = dict(zip(meta.get("symbol", []), meta.get("asset_class", []))) if not meta.empty else {}
-    name_by_symbol = dict(zip(meta.get("symbol", []), meta.get("name", []))) if not meta.empty else {}
+    # 人读标签只在 universe.label_maps 里生成，界面各处一律用它——
+    # 散落手写会让静态站与应用对同一个标的叫法不同。
+    label_by_symbol, name_by_symbol = universe.label_maps(meta)
     by_class: dict[str, float] = {}
     for symbol, weight in spec.weights.items():
         asset_class = str(class_by_symbol.get(symbol, "unknown"))
@@ -835,13 +837,21 @@ def compute_preset(
     episode_block = episodes_mod.replay(nav, benchmark, EPISODES)
 
     # 定投：按组合净值定投（隐含"每日再平衡"假设，页面上必须写明）
+    # 跑哪些模式**由 spec 决定**：请求的模式 + 固定金额作基准（便于对比）。
+    # 原先这里硬编码 ("fixed", "value_avg")，于是传入别的模式完全没有效果——
+    # 实验室里那个"定投方式"下拉框因此一直是摆设。
+    requested_mode = str(spec.dca.get("mode") or "fixed")
+    if requested_mode not in dca.MODES:
+        requested_mode = "fixed"
+    dca_modes = ["fixed"] if requested_mode == "fixed" else ["fixed", requested_mode]
     dca_runs: dict[str, Any] = {}
-    for mode in ("fixed", "value_avg"):
+    for mode in dca_modes:
         plan = dca.DcaPlan(
             amount=float(spec.dca.get("amount", 2000.0)),
             freq=str(spec.dca.get("freq", "monthly")),
             day=spec.dca.get("day"),
             mode=mode,  # type: ignore[arg-type]
+            params=dict(spec.dca.get("params") or {}),
         )
         try:
             result = dca.simulate(plan, nav)
@@ -886,6 +896,12 @@ def compute_preset(
         "rf_annual": rf_used,
         "rf_source": rate_env.source,
         "rf_tenor": rate_env.tenor_used,
+        # labels: symbol -> 人读标签（名称（代码 · 板块）），界面一律用它，别只显示代码
+        # names:  symbol -> 简短名称，用于图表坐标轴与图例（长标签会挤爆画布）
+        # 注意：这里**不能**用三引号写说明——字典字面量里那是字符串表达式，
+        # 会与后面的键发生隐式拼接，把整个键吃掉（踩过一次，nav 键就是这样消失的）。
+        "labels": label_by_symbol,
+        "names": name_by_symbol,
         "nav": _series_to_pairs(nav, step=3, keep_extremes=True),
         "drawdown": _series_to_pairs(drawdown, step=3, keep_extremes=True),
         "rolling_sharpe": _series_to_pairs(rolling, step=5),
@@ -1028,7 +1044,7 @@ def _drawdown_table(result: Mapping[str, Any]) -> str:
 def _dca_table(result: Mapping[str, Any]) -> str:
     rows = ""
     for mode, payload in result["dca"].items():
-        label = "固定金额" if mode == "fixed" else "价值平均"
+        label = dca.MODE_LABELS.get(str(mode), str(mode))
         if "error" in payload:
             rows += f"<tr><td>{theme.esc(label)}</td><td colspan='6' class='warn'>{theme.esc(payload['error'])}</td></tr>"
             continue
@@ -1050,8 +1066,9 @@ def _dca_table(result: Mapping[str, Any]) -> str:
 
 
 def _per_asset_table(result: Mapping[str, Any]) -> str:
+    labels = result.get("labels") or {}
     rows = "".join(
-        f"<tr><td>{theme.esc(s)}</td><td>{theme.pct(v['annualized_return'])}</td>"
+        f"<tr><td>{theme.esc(labels.get(s, s))}</td><td>{theme.pct(v['annualized_return'])}</td>"
         f"<td>{theme.pct(v['annualized_volatility'])}</td><td class='warn'>{theme.pct(v['max_drawdown'])}</td></tr>"
         for s, v in result["per_asset"].items()
     )
@@ -1113,7 +1130,9 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
 
     ``figs`` 收集各图的 data/layout，由调用方写进独立的 ``data/*.figs.js``。
     """
-    weights_chips = " · ".join(f"{theme.esc(s)} {w:.0%}" for s, w in result["weights"].items())
+    weights_chips = " · ".join(
+        f"{theme.esc((result.get('labels') or {}).get(s, s))} {w:.0%}" for s, w in result["weights"].items()
+    )
 
     # 条件渲染：面板与图表数据必须**同时**出现或同时缺席，
     # 否则会出现"有容器没数据"或"有数据没容器"（后者会让 id 对齐测试失败，前者是空白图）。

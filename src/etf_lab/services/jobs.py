@@ -45,6 +45,7 @@ def compute_custom_job(
     dca_mode: str = "fixed",
     db_path: str | None = None,
     rf_annual: float | None = None,
+    dca_params: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """计算用户自定义权重的组合：复用与示例组合**完全相同**的计算路径。
 
@@ -59,7 +60,13 @@ def compute_custom_job(
         name="自定义组合",
         question="你调整权重后，风险与收益各自变成了什么？",
         weights={k: float(v) for k, v in weights.items() if float(v) > 0},
-        dca={"amount": float(dca_amount), "freq": "monthly", "mode": dca_mode, "day": None},
+        dca={
+            "amount": float(dca_amount),
+            "freq": "monthly",
+            "mode": dca_mode,
+            "day": None,
+            "params": dict(dca_params or {}),
+        },
     )
     con = repo.connect(db_path, read_only=True)
     try:

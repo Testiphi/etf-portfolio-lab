@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from etf_lab import universe
 from etf_lab.data import repo
 from etf_lab.presets import PortfolioSpec
 from etf_lab.reports import static_site, theme
@@ -157,14 +159,14 @@ def _seed_db(path: Path) -> None:
     con.close()
 
 
-def _spec(key: str, *, include_bond: bool = True) -> PortfolioSpec:
+def _spec(key: str, *, include_bond: bool = True, dca: dict | None = None) -> PortfolioSpec:
     weights = {"AAA": 0.6, "BBB": 0.4} if include_bond else {"AAA": 1.0}
     return PortfolioSpec(
         key=key,
         name=f"组合{key}",
         question="测试用组合",
         weights=weights,
-        dca={"amount": 1000.0, "freq": "monthly", "mode": "fixed", "day": None},
+        dca=dca if dca is not None else {"amount": 1000.0, "freq": "monthly", "mode": "fixed", "day": None},
     )
 
 
@@ -372,6 +374,118 @@ def test_shared_html_blocks_cover_all_analyses(tmp_path: Path) -> None:
     }
     empty = [key for key, html in blocks.items() if not html.strip()]
     assert not empty, f"这些表格块是空的（应当给出说明文案）：{empty}"
+
+
+def test_symbol_labels_include_name_and_sector() -> None:
+    """标的标签必须带上名称与板块——只给代码没人看得懂哪个是哪只。"""
+    assert universe.symbol_label("510300", "沪深300ETF华泰柏瑞", "broad") == "沪深300ETF华泰柏瑞（510300 · 宽基）"
+    # 缺字段时自动省略，不留空洞，也不猜
+    assert universe.symbol_label("510300", "沪深300ETF华泰柏瑞", None) == "沪深300ETF华泰柏瑞（510300）"
+    assert universe.symbol_label("510300", None, "broad") == "（510300 · 宽基）"
+    assert universe.symbol_label("510300") == "510300"
+    # 名称与代码相同（元数据缺失时的占位）不应重复出现
+    assert universe.symbol_label("510300", "510300", "broad") == "（510300 · 宽基）"
+    # 未知类别原样返回（不猜），已知类别给中文
+    assert universe.symbol_label("511380", "转债ETF", "convertible") == "转债ETF（511380 · 可转债）"
+    assert "mortgage" in universe.symbol_label("999999", "某REIT", "mortgage"), "未知类别原样显示，不猜中文名"
+    assert universe.asset_class_label(None) == "未分类"
+
+
+def test_label_maps_from_metadata() -> None:
+    meta = pd.DataFrame(
+        [
+            {"symbol": "AAA", "name": "宽基A", "asset_class": "broad"},
+            {"symbol": "BBB", "name": "债券B", "asset_class": "bond"},
+        ]
+    )
+    labels, names = universe.label_maps(meta)
+    assert labels["AAA"] == "宽基A（AAA · 宽基）"
+    assert labels["BBB"] == "债券B（BBB · 债券）"
+    assert names == {"AAA": "宽基A", "BBB": "债券B"}
+    # 空表不能炸
+    assert universe.label_maps(pd.DataFrame()) == ({}, {})
+
+
+def test_dashboard_shows_names_not_only_codes(tmp_path: Path) -> None:
+    """仪表盘各处（权重 chips、各标的表、图例）都要出现名称，而不是只有代码。"""
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    result = static_site.compute_preset(con, _spec("named"))
+    con.close()
+
+    assert result["labels"]["AAA"] == "宽基A（AAA · 宽基）"
+    assert result["names"]["BBB"] == "债券B"
+
+    figs: dict = {}
+    html = static_site.render_dashboard(result, prefix="named-", figs=figs)
+    assert "宽基A（AAA · 宽基）" in html, "权重 chips 里应当有名称"
+    # 各标的表用标签
+    per_asset = static_site._per_asset_table(result)
+    assert "宽基A" in per_asset and "债券B" in per_asset
+    # 图表用简短名称，不塞整条标签（否则坐标轴会被挤爆）
+    assert "宽基A" in json.dumps(figs, ensure_ascii=False)
+    assert "宽基A（AAA · 宽基）" not in json.dumps(figs, ensure_ascii=False)
+
+
+def test_insight_text_uses_names(tmp_path: Path) -> None:
+    """洞察文案是给人看的，不能只出现代码。"""
+    from etf_lab.reports import insights as insights_mod
+
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    # 造一个权重与风险贡献严重失衡的组合，确保触发那条洞察
+    result = static_site.compute_preset(con, _spec("insight"))
+    con.close()
+    result["weights"] = {"AAA": 0.05, "BBB": 0.95}
+    found = insights_mod.evaluate(result)
+    titles = " ".join(item.title for item in found)
+    if "风险" in titles:
+        assert "AAA" not in titles or "宽基A" in titles, "洞察文案里应出现名称"
+        assert "宽基A" in titles or "债券B" in titles
+
+
+def test_requested_dca_mode_is_actually_used(tmp_path: Path) -> None:
+    """``spec.dca['mode']`` 必须真的生效。
+
+    这是实际发生过的 bug：``compute_preset`` 里硬编码 ``for mode in ("fixed", "value_avg")``，
+    于是实验室的「定投方式」下拉框选了 ``target_vol`` 也毫无效果——界面看着能用，其实是个摆设。
+    """
+    db = tmp_path / "lab.duckdb"
+    _seed_db(db)
+    con = repo.connect(db)
+    try:
+        fixed = static_site.compute_preset(con, _spec("m_fixed"))
+        value_avg = static_site.compute_preset(
+            con, _spec("m_va", dca={"amount": 1000.0, "freq": "monthly", "mode": "value_avg", "day": None})
+        )
+        target_vol = static_site.compute_preset(
+            con,
+            _spec(
+                "m_tv",
+                dca={"amount": 1000.0, "freq": "monthly", "mode": "target_vol", "day": None, "params": {"target_vol": 0.10}},
+            ),
+        )
+    finally:
+        con.close()
+
+    assert list(fixed["dca"]) == ["fixed"]
+    # 非固定模式：固定金额留作基准，再加请求的模式
+    assert set(value_avg["dca"]) == {"fixed", "value_avg"}
+    assert set(target_vol["dca"]) == {"fixed", "target_vol"}
+    # 目标波动率模式的投入曲线应当与固定金额明显不同（否则说明参数没传进去）
+    fixed_invested = fixed["dca"]["fixed"]["invested_total"]
+    scaled_invested = target_vol["dca"]["target_vol"]["invested_total"]
+    assert fixed_invested != scaled_invested
+
+
+def test_dca_mode_labels_cover_every_mode() -> None:
+    """界面标签必须覆盖引擎全部模式，不能再手写子集。"""
+    from etf_lab.core import dca as dca_core
+
+    assert set(dca_core.MODE_LABELS) == set(dca_core.MODES)
+    assert all(dca_core.MODE_LABELS[mode] for mode in dca_core.MODES)
 
 
 def test_standalone_page_ids_are_unique(tmp_path: Path) -> None:

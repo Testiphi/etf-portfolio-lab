@@ -65,6 +65,16 @@ def _f(result: Mapping[str, Any], *path: str, default: Any = None) -> Any:
 # --------------------------------------------------------------------------- #
 # 单条规则
 # --------------------------------------------------------------------------- #
+def _label(result: Mapping[str, Any], symbol: Any) -> str:
+    """标的的人读标签。
+
+    洞察文案是给**人**看的，不该只出现 ``510300`` 这样的代码——
+    没人记得住哪个代码对应哪只 ETF。机器可读的原值仍放在 ``evidence`` 里。
+    """
+    key = str(symbol)
+    return str((result.get("labels") or {}).get(key, key))
+
+
 def rule_risk_contribution_gap(result: Mapping[str, Any]) -> Insight | None:
     """权重与风险贡献失衡——最容易让人误解自己持仓结构的一条。"""
     shares = _f(result, "risk_contribution", "component_var_share", default={}) or {}
@@ -83,7 +93,7 @@ def rule_risk_contribution_gap(result: Mapping[str, Any]) -> Insight | None:
     return Insight(
         key="risk_contribution_gap",
         level="warn",
-        title=f"{symbol} 占 {weights.get(symbol, 0):.0%} 权重，却贡献 {share:.0%} 风险（{direction}权重 {abs(gap):.0%}）",
+        title=f"{_label(result, symbol)} 占 {weights.get(symbol, 0):.0%} 权重，却贡献 {share:.0%} 风险（{direction}权重 {abs(gap):.0%}）",
         card="risk_contribution",
         evidence={"symbol": symbol, "weight": weights.get(symbol), "risk_share": share, "gap": gap},
     )
@@ -97,7 +107,7 @@ def rule_high_correlation(result: Mapping[str, Any]) -> Insight | None:
     return Insight(
         key="high_correlation",
         level="warn",
-        title=f"{pair.get('a')} 与 {pair.get('b')} 相关系数 {float(rho):.3f}，几乎同涨同跌",
+        title=f"{_label(result, pair.get('a'))} 与 {_label(result, pair.get('b'))} 相关系数 {float(rho):.3f}，几乎同涨同跌",
         card="correlation",
         evidence=dict(pair),
     )
@@ -241,7 +251,7 @@ def rule_return_concentration(result: Mapping[str, Any]) -> Insight | None:
     return Insight(
         key="return_concentration",
         level="warn",
-        title=f"组合累计收益的 {float(share):.0%} 来自单一标的 {concentration.get('symbol')}",
+        title=f"组合累计收益的 {float(share):.0%} 来自单一标的 {_label(result, concentration.get('symbol'))}",
         card="diversification_ratio",
         evidence=dict(concentration),
     )

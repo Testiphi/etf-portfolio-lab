@@ -158,12 +158,20 @@ def read_index_panel(
     return panel
 
 
-def read_etf_meta(con: duckdb.DuckDBPyConnection, symbols: Iterable[str]) -> pd.DataFrame:
+def read_etf_meta(con: duckdb.DuckDBPyConnection, symbols: Iterable[str] | None = None) -> pd.DataFrame:
     """读取标的属性（资产类别、名称、跟踪指数等）。
 
     仪表盘要用资产类别来判断"配出了什么结构"（例如是否含跨境/债券），
     因此这是解锁机制的数据来源。
+
+    ``symbols=None`` 表示取全部——自定义实验室要列出**所有**已采集的标的，
+    这样新采集的标的会自动出现，而不需要改代码。
     """
+    if symbols is None:
+        return con.execute(
+            "SELECT symbol, name, asset_class, underlying_index, t_plus, is_cross_border "
+            "FROM etf_meta ORDER BY asset_class, symbol"
+        ).df()
     codes = list(symbols)
     if not codes:
         return pd.DataFrame()

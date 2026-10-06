@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
+from etf_lab.core import dca
 from etf_lab.reports import theme
 
 P = theme.PALETTE
@@ -42,6 +43,12 @@ def fig_nav(result: dict) -> go.Figure:
     return theme.dark(fig, height=300)
 
 
+def _chart_labels(result: dict) -> dict:
+    """图表用的短名称（不带代码与板块）——长标签会把坐标轴与图例挤爆。"""
+    labels = result.get("names") or {}
+    return {symbol: str(name) for symbol, name in labels.items()}
+
+
 def fig_return_contribution(result: dict) -> go.Figure:
     """收益归因：各标的的**对数贡献**（纵条，单位 %）。
 
@@ -51,12 +58,13 @@ def fig_return_contribution(result: dict) -> go.Figure:
     """
     risk = result.get("risk_contribution") or {}
     contrib = risk.get("log_contribution") or {}
+    labels = _chart_labels(result)
     symbols = list(contrib)
     values = [float(contrib[s]) * 100 for s in symbols]
     colors = [P["ok"] if v >= 0 else P["warn"] for v in values]
     fig = go.Figure(
         go.Bar(
-            x=symbols,
+            x=[labels.get(s, s) for s in symbols],
             y=values,
             marker_color=colors,
             text=[f"{v:+.1f}%" for v in values],
@@ -77,12 +85,13 @@ def fig_risk_vs_weight(result: dict) -> go.Figure:
     """权重 vs 风险贡献：两条横条并排，失衡一眼可见。"""
     shares = result.get("risk_contribution", {}).get("component_var_share", {}) or {}
     weights = result.get("weights", {}) or {}
+    labels = _chart_labels(result)
     symbols = list(weights)
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
             x=[float(weights.get(s, 0)) for s in symbols],
-            y=symbols,
+            y=[labels.get(s, s) for s in symbols],
             orientation="h",
             name="权重",
             marker_color=P["accent"],
@@ -91,7 +100,7 @@ def fig_risk_vs_weight(result: dict) -> go.Figure:
     fig.add_trace(
         go.Bar(
             x=[float(shares.get(s, 0) or 0) for s in symbols],
-            y=symbols,
+            y=[labels.get(s, s) for s in symbols],
             orientation="h",
             name="风险贡献",
             marker_color=P["warn"],
@@ -107,7 +116,7 @@ def fig_risk_vs_weight(result: dict) -> go.Figure:
 
 def fig_dca(result: dict) -> go.Figure:
     fig = go.Figure()
-    labels = {"fixed": "固定金额定投：市值", "value_avg": "价值平均定投：市值"}
+    labels = {mode: f"{label}定投：市值" for mode, label in dca.MODE_LABELS.items()}
     for index, (mode, payload) in enumerate(result["dca"].items()):
         if "error" in payload:
             continue
@@ -173,6 +182,7 @@ def fig_vol_term_structure(result: dict) -> go.Figure:
     """历史波动率的"期限结构"：各标的在不同回看窗口下的年化波动率。"""
     block = result.get("derivatives") or {}
     per_asset = block.get("per_asset") or {}
+    labels = _chart_labels(result)
     fig = go.Figure()
     for index, (symbol, term) in enumerate(per_asset.items()):
         windows = sorted(int(k) for k in term)
@@ -180,7 +190,7 @@ def fig_vol_term_structure(result: dict) -> go.Figure:
             go.Scatter(
                 x=windows,
                 y=[term[str(w)] for w in windows],
-                name=symbol,
+                name=labels.get(symbol, symbol),
                 mode="lines+markers",
                 line={"color": theme.SERIES_COLORS[index % len(theme.SERIES_COLORS)]},
             )
@@ -460,10 +470,12 @@ def fig_hedge_tradeoff(result: dict) -> go.Figure:
 
 
 def fig_per_asset(result: dict) -> go.Figure:
+    labels = _chart_labels(result)
     symbols = list(result["per_asset"])
+    titles = [labels.get(s, s) for s in symbols]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=symbols, y=[result["per_asset"][s]["annualized_return"] for s in symbols], name="年化收益", marker_color=P["accent"]))
-    fig.add_trace(go.Bar(x=symbols, y=[result["per_asset"][s]["max_drawdown"] for s in symbols], name="最大回撤", marker_color=P["warn"]))
+    fig.add_trace(go.Bar(x=titles, y=[result["per_asset"][s]["annualized_return"] for s in symbols], name="年化收益", marker_color=P["accent"]))
+    fig.add_trace(go.Bar(x=titles, y=[result["per_asset"][s]["max_drawdown"] for s in symbols], name="最大回撤", marker_color=P["warn"]))
     fig.update_layout(title="各标的单独持有：年化收益 vs 最大回撤", barmode="group", yaxis={"tickformat": ".0%"})
     return theme.dark(fig, height=260)
 

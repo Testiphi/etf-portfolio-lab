@@ -40,8 +40,9 @@ from typing import Any
 
 from nicegui import app, ui
 
-from etf_lab import __version__
+from etf_lab import __version__, universe
 from etf_lab.content import teaching
+from etf_lab.core import dca as dca_core
 from etf_lab.data import repo
 from etf_lab.presets import PRESETS, PRESETS_BY_KEY
 from etf_lab.reports import figures, insights as insights_mod, static_site
@@ -407,7 +408,7 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                 ui.label(f"计算失败：{type(exc).__name__}: {exc}").classes("warn")
                 ui.label("请先采集数据：python -m etf_lab.cli fetch --preset core").classes("muted")
 
-    def _save_controls(symbols, sliders, amount_input, mode_select) -> None:
+    def _save_controls(symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input) -> None:
         """保存组合——**唯一需要登录的功能**。
 
         没登录时这里只显示一句说明与链接，而不是把实验室锁起来。
@@ -428,11 +429,18 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                     ui.notify("权重之和不能为 0", type="warning")
                     return
                 weights = {s: v / total for s, v in raw.items() if v > 0}
+                mode = str(mode_select.value)
+                params: dict[str, float] = {}
+                if mode == "target_vol":
+                    params["target_vol"] = float(target_vol_input.value or 0.15)
+                elif mode == "take_profit":
+                    params["take_profit"] = float(take_profit_input.value or 0.30)
                 definition = {
                     "weights": weights,
                     "dca": {
                         "amount": float(amount_input.value or 2000),
-                        "mode": str(mode_select.value),
+                        "mode": mode,
+                        "params": params,
                     },
                 }
                 con = repo.connect_users(_users_path(db_path))
@@ -460,9 +468,23 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
 
         con = repo.connect(_db_path(db_path), read_only=True)
         try:
-            symbols = [row[0] for row in con.execute("SELECT DISTINCT symbol FROM etf_price ORDER BY symbol").fetchall()]
+            # 用 etf_meta 而不是 DISTINCT symbol：新采集的标的会自动出现在这里，
+            # 而且能显示名称与板块——**只给代码没人看得懂哪个是哪只**。
+            meta = repo.read_etf_meta(con)
         finally:
             con.close()
+        rows = [
+            {
+                "symbol": str(record.symbol),
+                "name": str(getattr(record, "name", None) or record.symbol),
+                "asset_class": universe.asset_class_label(getattr(record, "asset_class", None)),
+                "index": str(getattr(record, "underlying_index", None) or ""),
+                "t_plus": getattr(record, "t_plus", None),
+                "cross": bool(getattr(record, "is_cross_border", False)),
+            }
+            for record in meta.itertuples(index=False)
+        ]
+        symbols = [row["symbol"] for row in rows]
         if not symbols:
             ui.label("本地数据仓还没有行情数据，请先运行：python -m etf_lab.cli fetch --preset core").classes("warn")
             return
@@ -471,17 +493,50 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
         sliders: dict[str, Any] = {}
         output = ui.column().classes("w-full")
         with ui.card().classes("w-full"):
-            for symbol in symbols:
+            ui.label(f"可配标的：{len(rows)} 只（全部来自已采集的数据，不做任何硬编码）").classes("muted")
+            for row in rows:
                 with ui.row().classes("items-center w-full"):
-                    ui.label(symbol).classes("w-24")
-                    sliders[symbol] = ui.slider(min=0, max=100, step=5, value=0).classes("flex-grow")
-                    amounts[symbol] = ui.label("0%").classes("w-16 text-right")
-                    sliders[symbol].on_value_change(
-                        lambda event, s=symbol: amounts[s].set_text(f"{int(event.value)}%")
+                    with ui.column().classes("w-64 gap-0"):
+                        ui.label(f"{row['symbol']}　{row['name']}")
+                        detail = row["asset_class"]
+                        if row["index"]:
+                            detail += f"｜跟踪 {row['index']}"
+                        if row["cross"]:
+                            detail += "｜跨境"
+                        if row["t_plus"] is not None:
+                            detail += f"｜T+{int(row['t_plus'])}"
+                        ui.label(detail).classes("muted text-xs")
+                    sliders[row["symbol"]] = ui.slider(min=0, max=100, step=5, value=0).classes("flex-grow")
+                    amounts[row["symbol"]] = ui.label("0%").classes("w-16 text-right")
+                    sliders[row["symbol"]].on_value_change(
+                        lambda event, s=row["symbol"]: amounts[s].set_text(f"{int(event.value)}%")
                     )
-            amount_input = ui.number("每期定投金额（元）", value=2000, min=100, step=100)
-            mode_select = ui.select({"fixed": "固定金额", "value_avg": "价值平均"}, value="fixed", label="定投方式")
-            ui.button("计算", on_click=lambda: _run_lab(symbols, sliders, amount_input, mode_select, db_path, output))
+            with ui.row().classes("items-center gap-4"):
+                amount_input = ui.number("每期定投金额（元）", value=2000, min=100, step=100)
+                # 模式从引擎常量取，界面不再手写子集
+                mode_select = ui.select(
+                    {mode: dca_core.MODE_LABELS[mode] for mode in dca_core.MODES}, value="fixed", label="定投方式"
+                )
+                target_vol_input = ui.number("目标波动率", value=0.15, min=0.02, max=1.0, step=0.01, format="%.2f")
+                take_profit_input = ui.number("止盈阈值", value=0.30, min=0.05, max=2.0, step=0.05, format="%.2f")
+
+            def _sync_mode_params() -> None:
+                """只显示当前模式真正用得到的参数，避免给出一堆无效输入框。"""
+                target_vol_input.set_visibility(str(mode_select.value) == "target_vol")
+                take_profit_input.set_visibility(str(mode_select.value) == "take_profit")
+
+            mode_select.on_value_change(lambda _: _sync_mode_params())
+            _sync_mode_params()
+            ui.button(
+                "计算",
+                on_click=lambda: _run_lab(
+                    symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input, db_path, output
+                ),
+            )
+            ui.label(
+                "权重自动归一化到 100%；不设整数约束，5% 只是滑动步长。"
+                "「现金/空仓」目前不在资产列表里——计算路径假定资金全部投在标的上。"
+            ).classes("muted")
 
         # 从「我的组合」带过来的定义：只用于预填，不自动计算
         # （自动算会让页面在打开瞬间就跑一次重计算，而用户可能只是想改一改）
@@ -495,23 +550,36 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
             dca = loaded.get("dca") or {}
             if dca.get("amount"):
                 amount_input.value = float(dca["amount"])
-            if dca.get("mode") in ("fixed", "value_avg"):
+            if dca.get("mode") in dca_core.MODES:
                 mode_select.value = dca["mode"]
-            ui.label("已载入你保存的组合权重，点「计算」即可重算。").classes("muted")
+                saved_params = dca.get("params") or {}
+                if saved_params.get("target_vol"):
+                    target_vol_input.value = float(saved_params["target_vol"])
+                if saved_params.get("take_profit"):
+                    take_profit_input.value = float(saved_params["take_profit"])
+            ui.label("已载入你保存的组合权重与定投设置，点「计算」即可重算。").classes("muted")
         elif symbols:
             # 给个合理初值，让人一进来就能点"计算"看到东西
             sliders[symbols[0]].value = 100
             amounts[symbols[0]].set_text("100%")
 
-        _save_controls(symbols, sliders, amount_input, mode_select)
+        _save_controls(symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input)
 
-    async def _run_lab(symbols, sliders, amount_input, mode_select, db_path, output) -> None:
+    async def _run_lab(
+        symbols, sliders, amount_input, mode_select, target_vol_input, take_profit_input, db_path, output
+    ) -> None:
         raw = {s: float(sliders[s].value or 0) for s in symbols}
         total = sum(raw.values())
         if total <= 0:
             ui.notify("权重之和不能为 0", type="warning")
             return
         weights = {s: v / total for s, v in raw.items() if v > 0}
+        mode = str(mode_select.value)
+        params: dict[str, float] = {}
+        if mode == "target_vol":
+            params["target_vol"] = float(target_vol_input.value or 0.15)
+        elif mode == "take_profit":
+            params["take_profit"] = float(take_profit_input.value or 0.30)
         output.clear()
         with output:
             spinner = ui.spinner(size="lg")
@@ -520,13 +588,19 @@ def run(host: str = "127.0.0.1", port: int = 8080, db_path: str | Path | None = 
                     compute_custom_job,
                     weights,
                     float(amount_input.value or 2000),
-                    str(mode_select.value),
+                    mode,
                     _db_path(db_path),
+                    None,
+                    params,
                 )
                 spinner.delete()
                 _render_result(outcome.value)
-                ui.label(f"本次结果来源：{outcome.via}｜权重（已归一化）："
-                         + "、".join(f"{s} {w:.1%}" for s, w in weights.items())).classes("muted")
+                names = outcome.value.get("names") or {}
+                ui.label(
+                    f"本次结果来源：{outcome.via}｜定投方式：{dca_core.MODE_LABELS.get(mode, mode)}｜"
+                    + "权重（已归一化）："
+                    + "、".join(f"{names.get(s, s)} {w:.1%}" for s, w in weights.items())
+                ).classes("muted")
                 if outcome.note:
                     ui.label(outcome.note).classes("warn")
             except Exception as exc:  # noqa: BLE001

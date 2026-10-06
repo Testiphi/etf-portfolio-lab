@@ -78,3 +78,68 @@ T_PLUS_BY_CLASS: dict[str, int] = {
     "gold": 0,
     "cross_border": 0,
 }
+
+# 资产类别的中文名。界面上**必须**显示它，而不是只给一个代码——
+# 没人记得住 510300 与 510500 哪个是沪深300、哪个是中证500。
+ASSET_CLASS_LABELS: dict[str, str] = {
+    "broad": "宽基",
+    "industry": "行业",
+    "bond": "债券",
+    "convertible": "可转债",
+    "gold": "商品（黄金）",
+    "cross_border": "跨境",
+    "cash": "现金",
+}
+
+
+def asset_class_label(asset_class: str | None) -> str:
+    """资产类别的中文名；未知类别原样返回，不猜。"""
+    text = str(asset_class or "").strip()
+    if not text:
+        return "未分类"
+    return ASSET_CLASS_LABELS.get(text, text)
+
+
+def symbol_label(symbol: str, name: str | None = None, asset_class: str | None = None) -> str:
+    """标的的**人读标签**：``名称（代码 · 板块）``，缺失的字段自动省略。
+
+    全项目只在这里决定"怎么称呼一个标的"。散落各处手写会让静态站与应用
+    对同一个标的叫法不同——那正是"两条路线互相矛盾"的一种。
+    """
+    parts = [str(symbol)]
+    label = asset_class_label(asset_class) if asset_class else ""
+    if label and label != "未分类":
+        parts.append(label)
+    detail = " · ".join(parts)
+    clean_name = str(name or "").strip()
+    if not clean_name or clean_name == str(symbol):
+        # 没有名称时，只有"板块"这类额外信息才值得加括号；
+        # 否则会输出「（510300）」这种既冗余又难看的标签，不如直接给代码。
+        return f"（{detail}）" if len(parts) > 1 else str(symbol)
+    return f"{clean_name}（{detail}）"
+
+
+def label_maps(meta: Any) -> tuple[dict[str, str], dict[str, str]]:
+    """从 ``etf_meta`` 造出两张映射：``(完整标签, 简短名称)``。
+
+    * 完整标签用于表格、图例说明、自定义页——``沪深300ETF华泰柏瑞（510300 · 宽基）``
+    * 简短名称用于图表坐标轴与图例——``沪深300ETF华泰柏瑞``（长标签会把画布挤爆）
+
+    缺元数据时退回代码本身，而不是留空或猜名字。
+    """
+    labels: dict[str, str] = {}
+    names: dict[str, str] = {}
+    if meta is None or getattr(meta, "empty", True):
+        return labels, names
+    columns = set(getattr(meta, "columns", []))
+    if "symbol" not in columns:
+        return labels, names
+    has_name = "name" in columns
+    has_class = "asset_class" in columns
+    for row in meta.itertuples(index=False):
+        symbol = str(getattr(row, "symbol"))
+        name = str(getattr(row, "name")) if has_name and getattr(row, "name") is not None else None
+        asset_class = str(getattr(row, "asset_class")) if has_class and getattr(row, "asset_class") is not None else None
+        labels[symbol] = symbol_label(symbol, name, asset_class)
+        names[symbol] = (name or symbol)
+    return labels, names

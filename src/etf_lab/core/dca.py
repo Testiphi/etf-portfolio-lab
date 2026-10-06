@@ -27,6 +27,16 @@ from etf_lab.core import metrics
 
 TRADING_DAYS_PER_YEAR = 252
 
+MODES: tuple[str, ...] = ("fixed", "value_avg", "target_vol", "take_profit")
+"""引擎支持的全部定投模式。**界面必须从这里取**，别再手写子集——
+``compute_preset`` 曾硬编码只跑前两种，于是实验室里选了别的模式也毫无效果。"""
+MODE_LABELS: dict[str, str] = {
+    "fixed": "固定金额",
+    "value_avg": "价值平均",
+    "target_vol": "目标波动率",
+    "take_profit": "达标止盈",
+}
+
 
 # --------------------------------------------------------------------------- #
 # 参数对象
@@ -62,7 +72,6 @@ class DcaPlan:
     day: int | None = None
     mode: Literal["fixed", "value_avg", "target_vol", "take_profit"] = "fixed"
     params: Mapping[str, float] = field(default_factory=dict)
-
     def __post_init__(self) -> None:
         if self.amount <= 0:
             raise ValueError("每期投入金额必须为正")
