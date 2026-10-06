@@ -85,12 +85,19 @@ class DailyResult:
 
 
 def symbol_for(code: str, kind: Literal["etf", "index"] = "etf") -> str:
-    """代码 → 腾讯符号（``sh`` / ``sz`` 前缀）。
+    """代码 → 腾讯符号（``sh`` / ``sz`` 前缀，港澳美股指数原样使用）。
 
     只用公开稳定的编码约定，判不出来就报错——猜错会静默返回**另一只标的**的数据，
     这是采集层最危险的失败模式。
+
+    离岸指数（``hkHSI`` 恒生、``hkHSTECH`` 恒生科技等）在腾讯接口里**自带市场前缀**，
+    不能加 ``sh``/``sz``，否则会取到别的标的或直接空数据。
     """
     code = str(code).strip()
+    if code.startswith(("hk", "us")):
+        # 离岸代码自带市场前缀；实测美股指数（usINX/usIXIC/usDJI）这个接口没有日线，
+        # 港股指数（hkHSI/hkHSTECH）可用——可用性必须实测，不能假设。
+        return code
     if kind == "etf":
         if code.startswith("5"):
             return f"sh{code}"

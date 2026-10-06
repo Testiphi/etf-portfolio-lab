@@ -10,16 +10,30 @@ from typing import Any
 
 # symbol → 资产属性。
 ETF_PRESET: dict[str, dict[str, Any]] = {
+    # 注意：这里只能用 # 注释。**不能在字典字面量里写三引号**——
+    # 那是字符串表达式，会与后面的键发生隐式拼接，直接把字典写坏（我犯过两次）。
     "510300": {"asset_class": "broad", "underlying_index": "000300"},
     "510500": {"asset_class": "broad", "underlying_index": "000905"},
     "512100": {"asset_class": "broad", "underlying_index": "000852"},
+    # 科创50：A 股波动最高的宽基（实测年化波动 32%、最大回撤 −60%）；
+    # 而且只有在因子里含科创50 时，它的敞口才不会被误记到创业板指头上。
+    "588000": {"asset_class": "broad", "underlying_index": "000688"},
     "159915": {"asset_class": "broad", "underlying_index": "399006"},
     "515180": {"asset_class": "broad", "underlying_index": "000922"},
+    # 指数增强ETF（量化）：用于回答「增强到底增强了多少」——
+    # 实测 2021-12 至今跑赢沪深300 约 2pp/年，且波动更低。
+    "561300": {"asset_class": "broad", "underlying_index": "000300"},
+    # 500 增强ETF：实测同期跑赢中证500 约 7pp/年，**但波动也更高**——
+    # 正好是「超额收益 vs 额外风险」的对比样本。
+    "159678": {"asset_class": "broad", "underlying_index": "000905"},
     "511010": {"asset_class": "bond", "underlying_index": None},
     "511260": {"asset_class": "bond", "underlying_index": None},
     "518880": {"asset_class": "gold", "underlying_index": None},
     "513100": {"asset_class": "cross_border", "underlying_index": None},
     "159920": {"asset_class": "cross_border", "underlying_index": None},
+    # 标普500：历史比纳指ETF 长得多（2014 起），且与纳指相关性 0.86，
+    # 是「宽基 vs 科技集中」的现成对比。
+    "513500": {"asset_class": "cross_border", "underlying_index": None},
 }
 
 # 指数不可直接交易，仅用于补充 ETF 上市时间过短导致的样本不足。
@@ -27,11 +41,17 @@ INDEX_PRESET: dict[str, str] = {
     "000300": "沪深300",
     "000905": "中证500",
     "000852": "中证1000",
+    "000688": "科创50",
     "399006": "创业板指",
     "000922": "中证红利",
     "000016": "上证50",
     "000012": "上证国债指数",
     "000985": "中证全指",
+    # 离岸指数：跨境资产的收益必须由**离岸因子**解释，用 A 股因子回归它们毫无意义。
+    # 实测腾讯接口有港股指数、**没有美股指数**（usINX/usIXIC/usDJI 返回空），
+    # 所以标普500/纳指 ETF 目前仍只能落在低 R² 上（页面会如实警告）。
+    "hkHSI": "恒生指数",
+    "hkHSTECH": "恒生科技指数",
 }
 
 # 行业指数用于 RBSA 收益法敞口回归（**不需要**指数成分股名单）。
