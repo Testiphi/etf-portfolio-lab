@@ -52,6 +52,10 @@ h2 { font-size:14px; margin:0; font-weight:600; color:var(--fg); }
 .section-heading { font-size:18px; padding-top:16px; scroll-margin-top:90px; }
 .titlebar { scroll-margin-top:90px; }
 .overview-insights, .more-metrics { margin-top:12px; }
+.chart-status { padding:10px 12px; margin:12px 0; color:var(--gold); border:1px solid var(--line); border-radius:6px; }
+.chart-status[hidden] { display:none; }
+.chart-status button { margin-left:12px; padding:5px 10px; background:var(--panel-alt); color:var(--accent); border:1px solid var(--accent); border-radius:4px; cursor:pointer; }
+.chart-status button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .more-metrics > summary { cursor:pointer; color:var(--accent); padding:8px 0; }
 .panel > div { overflow-x:auto; }
 .prose-cell { white-space:normal; text-align:left; min-width:220px; }

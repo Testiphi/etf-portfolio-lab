@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import shutil
 from pathlib import Path
 from string import Template
 from typing import Any, Mapping, Sequence
@@ -1189,7 +1188,7 @@ PAGE = Template(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>$title</title>
 <link rel="stylesheet" href="$rootassets/style.css">
-<script src="$rootassets/plotly.min.js"></script>
+<script data-plotly src="$rootassets/plotly.min.js"></script>
 </head>
 <body>
 <header class="site-header">
@@ -1410,6 +1409,7 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
 
 {_metrics_keyboard(result)}
 <div class="overview-insights">{_insights_block(result)}</div>
+<div class="chart-status" data-chart-key="{theme.esc(result['key'])}" role="status" aria-live="polite" hidden></div>
 
 <div class="grid" style="margin-top:12px">
   {theme.panel("净值与水下曲线", theme.figure_div_for(figures.fig_nav, result, prefix, figs), span=12)}
@@ -1622,100 +1622,19 @@ def render_about(
     ) + '</tbody></table>' if results else '<p class="note">实际参数以组合报告为准。</p>'
     body = '<div class="titlebar"><h1>关于与口径</h1></div><div class="grid">' + (
         theme.panel("计算口径", rules_html, span=12)
-        + theme.panel("本次报告实际参数", actual, span=12)
+        + theme.panel("本次报告实际参数", actual + '<p class="note"><a href="build-manifest.json">下载本次构建清单</a>：代码与数据摘要、依赖版本、组合参数及模拟设置。</p>', span=12)
         + theme.panel("数据质量快照", quality.dataset_html(data_quality), span=12)
     ) + '</div>'
     return _page("口径 · ETF 组合数值实验室", body, root=root, data_version=data_version)
 
 
-def _copy_plotly_js(out_dir: Path) -> Path:
-    """把 plotly.min.js 复制一份到 assets/，各页面共享（每页内联会让站点膨胀到几十 MB）。"""
-    import plotly
-
-    source = Path(plotly.__file__).parent / "package_data" / "plotly.min.js"
-    if not source.exists():  # pragma: no cover - 依赖包结构变化时给出明确指引
-        raise RuntimeError(f"未找到 plotly.min.js：{source}；请确认 plotly 版本")
-    target_dir = out_dir / "assets"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "plotly.min.js"
-    shutil.copyfile(source, target)
-    return target
-
-
 def export_preset_prices(con, out_dir: Path) -> Path | None:
-    """导出示例组合用到的价格序列（供路线 B 的 Pyodide 页面直接吃）。"""
-    symbols: list[str] = []
-    for spec in PRESETS:
-        symbols.extend(s for s in spec.weights if s not in symbols)
-    panel = repo.read_price_panel(con, symbols, field="close_adj")
-    if panel.empty:
-        return None
-    payload = {
-        "data_version": repo.latest_data_version(con),
-        "field": "close_adj",
-        "note": "前复权收盘价；日期为交易日，缺失表示该标的当日无数据（不做填充）",
-        "dates": [str(idx.date()) for idx in panel.index],
-        "series": {c: [None if pd.isna(v) else round(float(v), 4) for v in panel[c]] for c in panel.columns},
-    }
-    target_dir = out_dir / "data"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / "preset_prices.json"
-    target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    return target
+    """兼容旧入口；文件导出由 site_builder 管理。"""
+    from etf_lab.reports.site_builder import export_preset_prices as export
+    return export(con, out_dir)
 
 
 def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_annual: float | None = None) -> Path:
-    """生成整站，返回输出目录。"""
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    con = repo.connect(db_path, read_only=True)
-    counts = repo.table_counts(con)
-    data_quality = repo.data_quality_summary(con)
-    data_version = repo.latest_data_version(con)
-    if counts.get("etf_price", 0) == 0:
-        raise RuntimeError("本地数据仓还没有行情数据，请先运行：python -m etf_lab.cli fetch --preset core")
-
-    _copy_plotly_js(out)
-    (out / "assets" / "style.css").write_text(theme.STYLE, encoding="utf-8")
-
-    results: list[dict[str, Any]] = []
-    dashboards: dict[str, str] = {}
-    figs_by_key: dict[str, dict[str, Any]] = {}
-    failures: list[str] = []
-    for spec in PRESETS:
-        try:
-            result = compute_preset(con, spec, rf_annual=rf_annual)
-            figs: dict[str, Any] = {}
-            # 仪表盘只渲染一次，首屏与独立页共用；图表数据同时被收集起来写文件
-            dashboards[spec.key] = render_dashboard(result, prefix=f"{spec.key}-", figs=figs)
-            figs_by_key[spec.key] = figs
-            results.append(result)
-        except Exception as exc:  # noqa: BLE001 - 单个组合作不出来不应让整站失败
-            failures.append(f"{spec.key}: {type(exc).__name__}: {exc}")
-
-    # 图表 JSON 外置：数据文件按档位懒加载且可被缓存
-    data_dir = out / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    for key, figs in figs_by_key.items():
-        (data_dir / f"{key}.figs.js").write_text(theme.figure_data_js(figs), encoding="utf-8")
-    (out / "assets" / "lab.js").write_text(theme.LAB_JS, encoding="utf-8")
-
-    (out / "index.html").write_text(
-        render_index(results, dashboards=dashboards, counts=counts, data_version=data_version, data_quality=data_quality), encoding="utf-8"
-    )
-    for result in results:
-        key = str(result["key"])
-        (out / f"{key}.html").write_text(
-            render_preset_page(result, dashboard=dashboards[key]), encoding="utf-8"
-        )
-    (out / "concepts.html").write_text(render_concepts(), encoding="utf-8")
-    (out / "about.html").write_text(render_about(counts=counts, data_version=data_version, data_quality=data_quality, results=results), encoding="utf-8")
-    (out / ".nojekyll").write_text("", encoding="utf-8")
-    export_preset_prices(con, out)
-
-    if failures:
-        print("以下组合未能生成（已跳过，未做填充）：")
-        for line in failures:
-            print(f"  - {line}")
-    return out
+    """保留 CLI 调用入口，延迟导入以避免循环依赖。"""
+    from etf_lab.reports.site_builder import build as build_site
+    return build_site(out_dir, db_path, rf_annual)

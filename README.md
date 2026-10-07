@@ -57,16 +57,16 @@
 
 ## 快速开始
 
-```bash
-# 1) 环境：用 uv 建虚拟环境并装依赖（国内直连 PyPI 会超时，用镜像）
+```powershell
+# 1) Windows / Python 3.12：安装锁定的运行与开发依赖（含 NiceGUI，不含 akshare）
 uv venv .venv --python 3.12
-uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels duckdb plotly pyyaml requests pytest nicegui `
+uv pip install --python .venv\Scripts\python.exe --require-hashes -r requirements.lock `
+  --index-url https://mirrors.aliyun.com/pypi/simple/
+# 安装本项目及 etf-lab 入口；依赖已经由锁定文件安装，不重复解析。
+uv pip install --python .venv\Scripts\python.exe --no-deps -e . `
   --index-url https://mirrors.aliyun.com/pypi/simple/
 
-#    未做 editable 安装也能直接跑（下面统一依赖 PYTHONPATH）：
-#    PowerShell:  $env:PYTHONPATH='src'
-
-# 2) 跑数值校验测试（这一步必须全绿，共 271 项）
+# 2) 跑数值与渲染校验测试（数量以当次测试输出为准）
 .venv\Scripts\python.exe -m pytest -q
 
 # 3) 采集数据到本地 DuckDB（生成 data/lab.duckdb，已 gitignore）
@@ -88,6 +88,25 @@ uv pip install --python .venv\Scripts\python.exe numpy pandas scipy statsmodels 
 .venv\Scripts\python.exe -m etf_lab.cli probe
 .venv\Scripts\python.exe scripts\verify_stored_data.py
 ```
+
+`pyproject.toml` 是依赖声明的唯一入口；`requirements.lock` 是从它生成的 **Windows / Python 3.12** 运行与测试环境快照，包含固定版本与分发文件 SHA-256。锁定范围不包括 editable 安装时的构建工具。其他系统或 Python 版本可使用 `uv pip install -e ".[app,dev]"` 解析依赖，但不视作已验证的同一环境。
+
+前端故障路径测试使用 Node.js 内置测试运行器，无需 npm 安装依赖：
+
+```powershell
+node --test tests/test_lab_runtime.cjs
+```
+
+维护依赖声明后，在 Windows / Python 3.12 下重新生成锁定文件并运行测试。保留已有版本的命令如下；有意升级时移除 `--constraints requirements.lock`：
+
+```powershell
+uv pip compile pyproject.toml --extra app --extra dev --python-version 3.12 --python-platform windows `
+  --constraints requirements.lock --generate-hashes --no-annotate --output-file requirements.lock
+```
+
+每次构建会生成 `docs/build-manifest.json`，记录源码摘要、行情库摘要、实际依赖版本、组合参数、无风险利率与模拟设置，并从口径页提供下载入口。完整复现仍需自行保留对应行情库快照；版本号或摘要不能代替原始数据。清单不包含账号库或本地文件路径。
+
+图表加载失败或超时会在页面显示提示与“重试图表”按钮；成功加载的组合数据保留缓存，单张图绘制失败只重试尚未成功的图表。静态站仍支持双击离线打开。
 
 > **akshare 不是必需依赖**。主数据路径走 `etl/tencent.py` 的纯 HTTP 实现——akshare 依赖
 > `py_mini_racer`（内含 V8 二进制），杀毒软件会误报甚至直接杀进程，本项目就被卡巴斯基
@@ -123,11 +142,11 @@ src/etf_lab/
 │   └── hedge.py       # Delta-Gamma 复制与再平衡频率（Boyle–Emanuel 标度律）
 ├── data/          # DuckDB schema 与读写层（唯一允许碰数据库的地方）
 ├── etl/           # 采集：tencent（主）/ sohu（校验）/ fund_nav / bond_yield / eastmoney（备用）
-├── reports/       # A 路线：静态站生成（计算与渲染分离）
+├── reports/       # A 路线：分析/渲染 static_site，文件构建 site_builder，复现清单 manifest，前端 assets/
 ├── app/           # C 路线：NiceGUI 界面
 ├── services/      # 缓存、进程池封装、可 pickle 的作业函数
 ├── content/       # 教学卡片文案（怎么算/说明什么/何时会误导）
-├── tests/         # 数值对照测试（271 项，含采集解析与防呆）
+├── tests/         # 数值对照测试（含采集解析与防呆）
 └── cli.py         # 统一命令入口
 ```
 

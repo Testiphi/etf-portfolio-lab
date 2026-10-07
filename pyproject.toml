@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # akshare 是**可选备用源**：它依赖 py_mini_racer（内含 V8 二进制，杀毒软件常误报甚至
-# 直接杀进程）。主数据路径走 etl/eastmoney.py 的纯 HTTP 实现，默认不需要它。
+# 直接杀进程）。主数据路径走 etl/tencent.py 的纯 HTTP 实现，默认不需要它。
 data = ["akshare>=1.14"]
 app = ["nicegui>=2.0"]
 dev = ["pytest>=8.0"]

@@ -1,0 +1,221 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-10-07T11:41:10.374664+00:00",
+  "code_version": "0.1.0",
+  "source_sha256": "18185374801a6cc7e4f71bf3d18b260597c51e1901e1d02e4c4fbee8144643d8",
+  "data_version": "20261006T185727",
+  "database_sha256": "b78470020c2029aa8fdc15f2f9a84ab42d6a8c0a0384b5d9dd4071b06545d0fa",
+  "requirements_lock_sha256": "f9f054fdacf9bb7af320305eedb423658d4eee530f900076026e33f583bbb586",
+  "python": "3.12.14",
+  "platform": "Windows",
+  "dependencies": {
+    "numpy": "2.5.3",
+    "pandas": "3.0.6",
+    "scipy": "1.18.1",
+    "statsmodels": "0.15.0",
+    "duckdb": "1.5.6",
+    "plotly": "7.1.0",
+    "pyyaml": "6.0.3",
+    "requests": "2.34.2",
+    "nicegui": "3.17.1"
+  },
+  "requested_presets": [
+    {
+      "key": "three_asset",
+      "name": "股债金三分法",
+      "question": "把资金分成股票、债券、黄金三份，究竟降低了哪一种风险？",
+      "weights": {
+        "510300": 0.5,
+        "511010": 0.3,
+        "518880": 0.2
+      },
+      "dca": {
+        "amount": 2000.0,
+        "freq": "monthly",
+        "mode": "fixed",
+        "day": null
+      },
+      "rebalance": {},
+      "cash": {},
+      "caveat": "债券 ETF 的价格受利率影响，久期越长波动越大；黄金不生息，长期收益取决于买入时点。"
+    },
+    {
+      "key": "broad_plus_industry",
+      "name": "宽基打底 + 行业卫星",
+      "question": "往宽基组合里加入一个行业板块，收益提升是否与风险提升相称？",
+      "weights": {
+        "510300": 0.6,
+        "510500": 0.2,
+        "159915": 0.2
+      },
+      "dca": {
+        "amount": 2000.0,
+        "freq": "monthly",
+        "mode": "fixed",
+        "day": null
+      },
+      "rebalance": {},
+      "cash": {},
+      "caveat": "行业与主题 ETF 上市时间普遍较短，样本不足会让「年化收益」看起来比实际更确定。"
+    },
+    {
+      "key": "cross_border",
+      "name": "加入跨境资产",
+      "question": "跨境 ETF 的收益里，有多少来自标的指数、多少来自汇率？",
+      "weights": {
+        "510300": 0.5,
+        "513100": 0.3,
+        "159920": 0.2
+      },
+      "dca": {
+        "amount": 2000.0,
+        "freq": "monthly",
+        "mode": "fixed",
+        "day": null
+      },
+      "rebalance": {},
+      "cash": {},
+      "caveat": "跨境 ETF 存在溢价、汇率与时区差异，其溢价回落会造成与指数无关的亏损。"
+    },
+    {
+      "key": "tech_quant",
+      "name": "科技、增强与全球化",
+      "question": "指数增强ETF 的超额收益，是真的 alpha，还是只是承担了更多风险？",
+      "weights": {
+        "588000": 0.3,
+        "561300": 0.25,
+        "513500": 0.25,
+        "511010": 0.2
+      },
+      "dca": {
+        "amount": 2000.0,
+        "freq": "monthly",
+        "mode": "fixed",
+        "day": null
+      },
+      "rebalance": {},
+      "cash": {},
+      "caveat": "三个坑要一起看：① 科创50 是波动最高的 A 股宽基（实测年化波动约 32%、最大回撤约 −60%），它的高波动会被组合里的债券摊薄，但不会消失；② 增强ETF 的历史很短（561300 自 2021-12、159678 自 2023-02），**几年跑赢不足以证明 alpha 可持续**——要同时看它的跟踪误差、换手与规模，样本一短，「超额」就与运气难以区分；③ 标普500 与纳指ETF 相关性约 0.86，两者同配并不能多分散多少，而且本项目**没有美股指数因子**，它们的敞口 R² 很低（页面会警告）。"
+    }
+  ],
+  "reports": [
+    {
+      "key": "three_asset",
+      "start": "2013-07-29",
+      "end": "2026-09-30",
+      "n_obs": 3205,
+      "rf_annual": 0.012197,
+      "rf_source": "curve",
+      "monte_carlo": {
+        "n_paths": 4000,
+        "horizon_days": 1260,
+        "horizon_years": 5.0,
+        "goal_annual": 0.08,
+        "deep_drawdown": -0.3,
+        "seed": 20260101
+      },
+      "hedge": {
+        "spot": 1.0,
+        "sigma": 0.126223,
+        "r": 0.012197,
+        "tenor_years": 1.0,
+        "strike": 0.95,
+        "strike_ratio": 0.95,
+        "target_ratio": 0.5,
+        "cost_bps": 15.0,
+        "notional_units": 1.750341,
+        "n_paths": 2000,
+        "seed": 20260101
+      }
+    },
+    {
+      "key": "broad_plus_industry",
+      "start": "2013-03-15",
+      "end": "2026-09-30",
+      "n_obs": 3290,
+      "rf_annual": 0.012197,
+      "rf_source": "curve",
+      "monte_carlo": {
+        "n_paths": 4000,
+        "horizon_days": 1260,
+        "horizon_years": 5.0,
+        "goal_annual": 0.08,
+        "deep_drawdown": -0.3,
+        "seed": 20260101
+      },
+      "hedge": {
+        "spot": 1.0,
+        "sigma": 0.216547,
+        "r": 0.012197,
+        "tenor_years": 1.0,
+        "strike": 0.95,
+        "strike_ratio": 0.95,
+        "target_ratio": 0.5,
+        "cost_bps": 15.0,
+        "notional_units": 1.453328,
+        "n_paths": 2000,
+        "seed": 20260101
+      }
+    },
+    {
+      "key": "cross_border",
+      "start": "2013-05-15",
+      "end": "2026-09-30",
+      "n_obs": 3254,
+      "rf_annual": 0.012197,
+      "rf_source": "curve",
+      "monte_carlo": {
+        "n_paths": 4000,
+        "horizon_days": 1260,
+        "horizon_years": 5.0,
+        "goal_annual": 0.08,
+        "deep_drawdown": -0.3,
+        "seed": 20260101
+      },
+      "hedge": {
+        "spot": 1.0,
+        "sigma": 0.166466,
+        "r": 0.012197,
+        "tenor_years": 1.0,
+        "strike": 0.95,
+        "strike_ratio": 0.95,
+        "target_ratio": 0.5,
+        "cost_bps": 15.0,
+        "notional_units": 1.557163,
+        "n_paths": 2000,
+        "seed": 20260101
+      }
+    },
+    {
+      "key": "tech_quant",
+      "start": "2021-12-10",
+      "end": "2026-09-30",
+      "n_obs": 1165,
+      "rf_annual": 0.012197,
+      "rf_source": "curve",
+      "monte_carlo": {
+        "n_paths": 4000,
+        "horizon_days": 1260,
+        "horizon_years": 5.0,
+        "goal_annual": 0.08,
+        "deep_drawdown": -0.3,
+        "seed": 20260101
+      },
+      "hedge": {
+        "spot": 1.0,
+        "sigma": 0.187451,
+        "r": 0.012197,
+        "tenor_years": 1.0,
+        "strike": 0.95,
+        "strike_ratio": 0.95,
+        "target_ratio": 0.5,
+        "cost_bps": 15.0,
+        "notional_units": 1.502788,
+        "n_paths": 2000,
+        "seed": 20260101
+      }
+    }
+  ],
+  "failed_presets": [],
+  "note": "完整复现需要相同源代码、依赖、参数和行情库快照；本清单不包含行情库。源码摘要按相对路径与标准化换行后的文本计算。"
+}

@@ -303,3 +303,10 @@ A 路径仪表盘有 17 张图，而 C 路径只渲染了净值/定投/各标的
 | `data/users.duckdb` | 账号与已保存的组合，事务型小库 | 只有主进程读写 |
 
 由此得到一条可用测试守住的不变量：**保存组合之后，行情库仍能被只读打开**。
+
+
+## 静态构建与复现入口
+
+`reports/static_site.py` 保留计算与 HTML 渲染及兼容入口；`reports/site_builder.py` 负责文件输出，在整个构建期间持有只读行情连接并在退出时关闭。图表运行时代码位于 `reports/assets/lab.js`，由包资源加载并写入 `docs/assets/lab.js`，不要单独修改生成文件。
+
+`reports/manifest.py` 生成 `docs/build-manifest.json`，记录源码文本摘要、数据库文件摘要、实际运行依赖和组合参数。源码摘要包含 Python、JavaScript 与 SQL，标准化换行后按相对路径排序计算。数据库摘要用于确认保存的行情快照，不能从摘要恢复数据。当前依赖锁定基线是 Windows / Python 3.12，不覆盖所有平台或构建工具。
