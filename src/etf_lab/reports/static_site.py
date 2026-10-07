@@ -31,10 +31,11 @@ from etf_lab.core import correlation, dca, derivatives as derivatives_mod, episo
 from etf_lab.data import repo
 from etf_lab.etl import fund_nav
 from etf_lab.presets import PRESETS, PortfolioSpec
+from etf_lab.reports import quality
 from etf_lab.reports import figures, insights as insights_mod, theme
 
 RF_ANNUAL_DEFAULT = 0.02
-"""教学场景下固定的无风险利率。真实使用时应从国债收益率曲线取，并在页面标注。"""
+"""无法从国债曲线取得所需期限时使用的年化假设值。"""
 ROLLING_WINDOW = 252
 """滚动夏普窗口（约一年）。"""
 ADJUSTMENT_STEP = 0.01
@@ -1114,7 +1115,8 @@ def compute_preset(
         "n_obs": int(len(aligned)),
         "data_version": repo.latest_data_version(con),
         "rf_annual": rf_used,
-        "rf_source": rate_env.source,
+        "rf_source": "override" if rf_annual is not None else rate_env.source,
+        "data_coverage": quality.coverage_summary(panel, aligned),
         "rf_tenor": rate_env.tenor_used,
         # labels: symbol -> 人读标签（名称（代码 · 板块）），界面一律用它，别只显示代码
         # names:  symbol -> 简短名称，用于图表坐标轴与图例（长标签会挤爆画布）
@@ -1248,9 +1250,15 @@ def _metrics_keyboard(result: Mapping[str, Any]) -> str:
         ("组合折溢价", theme.pct((result.get("premium_discount") or {}).get("weighted_latest")), "premium_discount", False),
         ("时间加权年化", theme.pct(result.get("time_weighted_annualized")), "xirr", False),
     ]
-    return '<div class="tiles">' + "".join(
-        theme.metric_tile(label, value, card, warn=warn) for label, value, card, warn in tiles
-    ) + "</div>"
+    primary = {"年化收益（复合）", "年化波动", "夏普", "最大回撤"}
+    def render(items: Sequence[tuple[str, str, str | None, bool]]) -> str:
+        return '<div class="tiles">' + "".join(
+            theme.metric_tile(label, value, card, warn=warn) for label, value, card, warn in items
+        ) + "</div>"
+    return render([t for t in tiles if t[0] in primary]) + (
+        '<details class="more-metrics"><summary>更多指标与计算口径</summary>'
+        + render([t for t in tiles if t[0] not in primary]) + '</details>'
+    )
 
 
 def _drawdown_table(result: Mapping[str, Any]) -> str:
@@ -1382,8 +1390,17 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
             span=12,
         )
 
+    groups = (("overview", "概览"), ("risk", "风险与归因"), ("dca", "定投"),
+              ("exposure", "敞口与利率"), ("simulation", "情景实验"), ("coverage", "数据覆盖"))
+    navigation = '<nav class="section-nav" aria-label="分析分区">' + "".join(
+        f'<a href="#{theme.esc(prefix + key)}">{label}</a>' for key, label in groups
+    ) + '</nav>'
+    def heading(key: str, label: str) -> str:
+        return f'<h2 class="section-heading span-12" id="{theme.esc(prefix + key)}">{label}</h2>'
+
     return f"""
-<div class="titlebar">
+{navigation}
+<div class="titlebar" id="{theme.esc(prefix)}overview">
   <div>
     <h1>{theme.esc(result['name'])}</h1>
     <div class="q">{theme.esc(result['question'])}</div>
@@ -1392,9 +1409,11 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
 </div>
 
 {_metrics_keyboard(result)}
+<div class="overview-insights">{_insights_block(result)}</div>
 
 <div class="grid" style="margin-top:12px">
-  {theme.panel("净值与水下曲线", theme.figure_div_for(figures.fig_nav, result, prefix, figs), span=8)}
+  {theme.panel("净值与水下曲线", theme.figure_div_for(figures.fig_nav, result, prefix, figs), span=12)}
+  {heading("risk", "风险与收益归因")}
   {theme.panel("收益归因", theme.figure_div_for(figures.fig_return_contribution, result, prefix, figs)
     + "<p class='note'>归因用<b>对数贡献</b>（各标的的对数收益 × 权重）：它扣掉了每个标的自身的复利效应，"
     + "量级与实际收益可比。算术贡献会被各标的自身的波动拖累主导（长周期里单一标的能到 +8000bp，"
@@ -1406,19 +1425,22 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
     + "，差额 <b>"
     + theme.pct((result.get('risk_contribution') or {}).get('rebalancing_effect'))
     + "</b> 就是<b>再平衡/分散化效应</b>——由 Jensen 不等式它恒为非负："
-    + "每日再平衡会在波动中不断把权重拉回目标，从而多得一部分收益。</p>", span=4)}
+    + "每日再平衡会在波动中不断把权重拉回目标，从而多得一部分收益。</p>", span=6)}
   {theme.panel("权重 vs 风险贡献", theme.figure_div_for(figures.fig_risk_vs_weight, result, prefix, figs), span=6)}
   {theme.panel("再平衡规则的影响", _rebalance_table(result), span=6)}
   {theme.panel("回撤最深的前五段", _drawdown_table(result), span=6)}
+  {heading("dca", "定投与持有表现")}
   {theme.panel("定投：三种收益率口径", _dca_table(result), span=6)}
   {theme.panel("定投：市值 vs 累计投入", theme.figure_div_for(figures.fig_dca, result, prefix, figs), span=6)}
   {theme.panel("滚动一年夏普", theme.figure_div_for(figures.fig_rolling_sharpe, result, prefix, figs), span=4)}
   {theme.panel("各标的单独持有", _per_asset_table(result), span=4)}
   {theme.panel("各标的年化 vs 最大回撤", theme.figure_div_for(figures.fig_per_asset, result, prefix, figs), span=4)}
+  {heading("exposure", "敞口与利率环境")}
   {theme.panel("因子敞口矩阵（热力图）", theme.figure_div_for(figures.fig_exposure_heatmap, result, prefix, figs), span=12)}
   {theme.panel("敞口明细与拟合质量", _exposure_table(result), span=12)}
   {rate_panels}
   {duration_panel}
+  {heading("simulation", "情景与保护实验")}
   {theme.panel("波动率期限结构", theme.figure_div_for(figures.fig_vol_term_structure, result, prefix, figs)
     + "<p class='note'>不同回看窗口下的<b>历史</b>波动率。它不是隐含波动率——"
     + "隐含波动率是市场对<b>未来</b>波动的定价，恐慌时会显著高于历史波动率，"
@@ -1435,7 +1457,8 @@ def render_dashboard(result: Mapping[str, Any], *, prefix: str = "", figs: dict[
   {theme.panel("四个模型的结论对比", _monte_carlo_tables(result), span=7)}
   {theme.panel("历史情节重放", theme.figure_div_for(figures.fig_episodes, result, prefix, figs)
     + _episodes_block(result), span=12)}
-  {theme.panel("洞察（由数据触发）", _insights_block(result), span=12)}
+  {heading("coverage", "样本覆盖与模块状态")}
+  {theme.panel("组合样本覆盖", quality.coverage_html(result), span=12)}
   {theme.panel("可解锁模块", _unlocks_block(result), span=12)}
 </div>
 """
@@ -1480,6 +1503,7 @@ def render_index(
     counts: Mapping[str, int],
     data_version: str,
     root: str = "",
+    data_quality: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     """首屏：**一进来就是数据**。档位切换用纯 CSS，图表数据按档位**懒加载**。
 
@@ -1509,7 +1533,6 @@ def render_index(
         f'<section class="gear-pane" id="pane{i}">{dashboards.get(str(r.get("key")), "")}</section>'
         for i, r in enumerate(results)
     )
-    counts_rows = "".join(f"<tr><td>{theme.esc(k)}</td><td>{v:,}</td></tr>" for k, v in counts.items() if v)
     body = f"""
 {_gear_css(len(results))}
 <div class="gear-wrap">
@@ -1518,14 +1541,12 @@ def render_index(
   <div class="gear-panes">{panes}</div>
 </div>
 <div class="grid" style="margin-top:12px">
-  {theme.panel("数据底座", "<table><thead><tr><th>表</th><th>行数</th></tr></thead><tbody>" + counts_rows + "</tbody></table>"
-    + f"<p class='note'>数据版本 <code>{theme.esc(data_version)}</code>。行情来自公开接口，数据不随仓库分发。</p>", span=6)}
+  {theme.panel("数据质量快照", quality.dataset_html(data_quality) + f"<p class='note'>数据版本 <code>{theme.esc(data_version)}</code>；数据内容截至各表最新日期。</p>", span=12)}
   {theme.panel("怎么读这个站", '''<p class="note">上面每一格数字里都有 <span class="hintmark">◂</span>，点开才是公式与「什么时候会骗人」。默认视图不放讲解。</p>
   <p class="note">页面里的<b>洞察条</b>不是写好的文案，而是规则引擎读你这份组合算出来的数字后浮出来的——
   换个组合，浮出来的提醒就变了。配出特定结构（含跨境、含债券、带对冲）还会解锁对应模块。</p>
-  <p class="note">图表数据按档位单独存放、切换时按需加载；这样首页只有几十 KB，
-  而每个档位的数据文件都会被浏览器缓存。曲线做了抽稀并保留极值点，
-  画面上看不出差别，体积却小很多。</p>''', span=6)}
+  <p class="note">图表数据按组合单独存放、切换时按需加载。曲线经过抽稀并保留极值点，
+  展示不包含所有逐日点；指标使用完整计算样本。</p>''', span=6)}
 </div>
 <script src="{root}assets/lab.js"></script>
 <script>labInitTabs();</script>
@@ -1575,28 +1596,35 @@ def render_concepts(*, root: str = "") -> str:
     return _page("知识附录 · ETF 组合数值实验室", body, root=root)
 
 
-def render_about(*, counts: Mapping[str, int], data_version: str, root: str = "") -> str:
-    counts_rows = "".join(f"<tr><td>{theme.esc(k)}</td><td>{v:,}</td></tr>" for k, v in counts.items())
-    body = f"""
-<div class="titlebar"><div><h1>关于与口径</h1><div class="q">{theme.esc(teaching.DISCLAIMER)}</div></div></div>
-<div class="grid">
-  {theme.panel("数据来源与口径", '''<table><tbody>
-  <tr><td>ETF 行情</td><td>腾讯公开接口（主源），按区间分页取完整历史</td></tr>
-  <tr><td>独立校验源</td><td>搜狐公开接口（未复权价），逐日交叉校验，中位差异为 0</td></tr>
-  <tr><td>复权口径</td><td><strong>前复权</strong>用于一切收益计算；同时保留未复权价与复权因子</td></tr>
-  <tr><td>指数成分股</td><td>不使用成分股名单；风险敞口将改用收益法风格分析（RBSA）</td></tr>
-  <tr><td>再平衡假设</td><td>每日再平衡（权重每天回到目标值）</td></tr>
-  <tr><td>无风险利率</td><td>教学场景固定 ''' + theme.pct(RF_ANNUAL_DEFAULT) + '''，页面显示具体取值</td></tr>
-  <tr><td>缺失值</td><td>不做任何填充；标的未上市期间直接排除该日期</td></tr>
-  <tr><td>风险贡献</td><td>成分 VaR 的欧拉分解（正态近似），之和等于组合 VaR</td></tr>
-  </tbody></table>''', span=6)}
-  {theme.panel("数据底座", "<table><thead><tr><th>表</th><th>行数</th></tr></thead><tbody>" + counts_rows + "</tbody></table>"
-    + f"<p class='note'>数据版本 <code>{theme.esc(data_version)}</code>。</p>", span=6)}
-  {theme.panel("尚未接入", '''<p class="note">国债收益率曲线、股指期货基差与展期成本、ETF 期权与隐含波动率、汇率——
-  这四类数据需要另找公开接口。它们对应的概念卡片（久期、Greeks、汇率贡献、对冲成本）
-  已经可以在「可解锁模块」里提前读到，但暂无实测数字。</p>''', span=12)}
-</div>
-"""
+def render_about(
+    *, counts: Mapping[str, int], data_version: str, root: str = "",
+    data_quality: Sequence[Mapping[str, Any]] | None = None,
+    results: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    rules = (
+        ("复权口径", "ETF 收益统一使用前复权收盘价；未复权价与复权因子用于诊断。"),
+        ("风险敞口", "已实现 RBSA 收益法风格分析，是回归估计而非成分股穿透；美股因子仍不完整，须结合拟合质量阅读。"),
+        ("再平衡", "默认每日再平衡、单边成本 0 bp；实算应用可调整规则与成本，以各组合面板为准。"),
+        ("无风险利率", "默认取国债曲线的 1 年期，在曲线最新日期前 15 天内取该期限的最近有效值；取不到时退回 2% 假设，也支持显式覆盖。用于整段统计的固定年化值，并非逐日历史利率。"),
+        ("缺失值", "价格不填充，仅保留组合各标的都有价格的日期；区间损失见组合样本覆盖。"),
+        ("风险贡献", "成分 VaR 的欧拉分解，使用正态近似。"),
+        ("汇率与现金", "已接入汇率与国债曲线；人民币现金按短端计息，美元现金默认不生息。跨境分析受交易时差与净值披露滞后影响。"),
+        ("期货与期权", "尚未接入真实期货基差、展期成本与期权链。保护成本、Greeks 和复制均为模型实验，不能视作市场报价。"),
+    )
+    rules_html = '<table><tbody>' + ''.join(
+        f'<tr><td>{theme.esc(k)}</td><td class="prose-cell">{theme.esc(v)}</td></tr>' for k, v in rules
+    ) + '</tbody></table>'
+    source_labels = {"curve": "国债曲线", "assumption": "兜底假设", "override": "显式覆盖"}
+    actual = '<table><thead><tr><th>组合</th><th>实际无风险利率</th><th>来源</th><th>样本区间</th></tr></thead><tbody>' + ''.join(
+        f'<tr><td>{theme.esc(r["name"])}</td><td>{theme.pct(r["rf_annual"])}</td>'
+        f'<td>{theme.esc(source_labels.get(r["rf_source"], r["rf_source"]))}</td>'
+        f'<td>{theme.esc(r["start"])} ~ {theme.esc(r["end"])}</td></tr>' for r in results
+    ) + '</tbody></table>' if results else '<p class="note">实际参数以组合报告为准。</p>'
+    body = '<div class="titlebar"><h1>关于与口径</h1></div><div class="grid">' + (
+        theme.panel("计算口径", rules_html, span=12)
+        + theme.panel("本次报告实际参数", actual, span=12)
+        + theme.panel("数据质量快照", quality.dataset_html(data_quality), span=12)
+    ) + '</div>'
     return _page("口径 · ETF 组合数值实验室", body, root=root, data_version=data_version)
 
 
@@ -1641,8 +1669,9 @@ def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_an
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    con = repo.connect(db_path)
+    con = repo.connect(db_path, read_only=True)
     counts = repo.table_counts(con)
+    data_quality = repo.data_quality_summary(con)
     data_version = repo.latest_data_version(con)
     if counts.get("etf_price", 0) == 0:
         raise RuntimeError("本地数据仓还没有行情数据，请先运行：python -m etf_lab.cli fetch --preset core")
@@ -1665,7 +1694,7 @@ def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_an
         except Exception as exc:  # noqa: BLE001 - 单个组合作不出来不应让整站失败
             failures.append(f"{spec.key}: {type(exc).__name__}: {exc}")
 
-    # 图表 JSON 外置：页面因此只有几十 KB，数据文件按档位懒加载且可被缓存
+    # 图表 JSON 外置：数据文件按档位懒加载且可被缓存
     data_dir = out / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     for key, figs in figs_by_key.items():
@@ -1673,7 +1702,7 @@ def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_an
     (out / "assets" / "lab.js").write_text(theme.LAB_JS, encoding="utf-8")
 
     (out / "index.html").write_text(
-        render_index(results, dashboards=dashboards, counts=counts, data_version=data_version), encoding="utf-8"
+        render_index(results, dashboards=dashboards, counts=counts, data_version=data_version, data_quality=data_quality), encoding="utf-8"
     )
     for result in results:
         key = str(result["key"])
@@ -1681,7 +1710,7 @@ def build(out_dir: str | Path = "docs", db_path: str | Path | None = None, rf_an
             render_preset_page(result, dashboard=dashboards[key]), encoding="utf-8"
         )
     (out / "concepts.html").write_text(render_concepts(), encoding="utf-8")
-    (out / "about.html").write_text(render_about(counts=counts, data_version=data_version), encoding="utf-8")
+    (out / "about.html").write_text(render_about(counts=counts, data_version=data_version, data_quality=data_quality, results=results), encoding="utf-8")
     (out / ".nojekyll").write_text("", encoding="utf-8")
     export_preset_prices(con, out)
 

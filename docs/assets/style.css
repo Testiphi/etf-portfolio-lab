@@ -47,6 +47,22 @@ h2 { font-size:14px; margin:0; font-weight:600; color:var(--fg); }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
 .panel > header { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:8px; }
 
+.section-nav { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 12px; }
+.section-nav a { padding:6px 12px; border:1px solid var(--line); border-radius:6px; }
+.section-heading { font-size:18px; padding-top:16px; scroll-margin-top:90px; }
+.titlebar { scroll-margin-top:90px; }
+.overview-insights, .more-metrics { margin-top:12px; }
+.more-metrics > summary { cursor:pointer; color:var(--accent); padding:8px 0; }
+.panel > div { overflow-x:auto; }
+.prose-cell { white-space:normal; text-align:left; min-width:220px; }
+a:focus-visible, summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+@media (max-width:600px) {
+  .site-header { flex-wrap:wrap; gap:8px; }
+  .site-header nav { display:flex; flex-wrap:wrap; gap:12px; }
+  .site-header nav a { margin-left:0; }
+  main { padding:12px 10px 40px; }
+  .gear-custom { margin-left:0; }
+}
 /* 指标键盘：每格是可以点开的 <details>，展开后是公式与陷阱。
    注意选择器写成 .tile .label 而不是 details.tile .label——
    没有关联知识卡片的那几格是普通 <div>，早期版本用 details 前缀选择器导致

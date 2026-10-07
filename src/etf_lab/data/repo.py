@@ -92,6 +92,25 @@ def latest_data_version(con: duckdb.DuckDBPyConnection) -> str:
     return str(row[0]) if row else "empty"
 
 
+def data_quality_summary(con: duckdb.DuckDBPyConnection) -> list[dict]:
+    """只读统计现有记录；不把空值比例当作交易日完整率。"""
+    from etf_lab.content.data_sources import DATASETS
+
+    rows = []
+    for table, label, field, source in DATASETS:
+        count, first, last, missing = con.execute(
+            f'SELECT COUNT(*), MIN(date), MAX(date), '
+            f'COUNT(*) FILTER (WHERE "{field}" IS NULL OR NOT isfinite("{field}")) FROM {table}'
+        ).fetchone()
+        rows.append({
+            "table": table, "label": label, "field": field, "source": source,
+            "rows": count, "start": str(first) if first else None,
+            "end": str(last) if last else None, "missing": missing,
+            "missing_ratio": missing / count if count else None,
+        })
+    return rows
+
+
 def read_price_panel(
     con: duckdb.DuckDBPyConnection,
     symbols: Iterable[str],
