@@ -39,3 +39,6 @@ logs/
 Thumbs.db
 .idea/
 .vscode/
+
+# 构建暂存与故障恢复备份
+/.etf-build-*/
