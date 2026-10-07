@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 from typing import Iterable, Sequence
+from uuid import uuid4
 
 import duckdb
 import pandas as pd
@@ -78,10 +79,14 @@ def upsert(con: duckdb.DuckDBPyConnection, table: str, frame: pd.DataFrame, colu
 
 def log_data_version(con: duckdb.DuckDBPyConnection, source: str, notes: str = "") -> str:
     """记录一次数据更新，返回版本号（同时用于缓存键）。"""
-    version = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+    updated_at = dt.datetime.now()
+    previous = con.execute("SELECT MAX(updated_at) FROM data_version").fetchone()[0]
+    if previous is not None and updated_at <= previous:
+        updated_at = previous + dt.timedelta(microseconds=1)
+    version = updated_at.strftime("%Y%m%dT%H%M%S%f") + "-" + uuid4().hex[:8]
     con.execute(
-        "INSERT OR REPLACE INTO data_version VALUES (?, ?, ?, ?)",
-        [version, dt.datetime.now(), source, notes],
+        "INSERT INTO data_version VALUES (?, ?, ?, ?)",
+        [version, updated_at, source, notes],
     )
     return version
 
@@ -95,6 +100,7 @@ def latest_data_version(con: duckdb.DuckDBPyConnection) -> str:
 def data_quality_summary(con: duckdb.DuckDBPyConnection) -> list[dict]:
     """只读统计现有记录；不把空值比例当作交易日完整率。"""
     from etf_lab.content.data_sources import DATASETS
+    from etf_lab.data.audit import etf_checks
 
     rows = []
     for table, label, field, source in DATASETS:
@@ -102,12 +108,15 @@ def data_quality_summary(con: duckdb.DuckDBPyConnection) -> list[dict]:
             f'SELECT COUNT(*), MIN(date), MAX(date), '
             f'COUNT(*) FILTER (WHERE "{field}" IS NULL OR NOT isfinite("{field}")) FROM {table}'
         ).fetchone()
-        rows.append({
+        row = {
             "table": table, "label": label, "field": field, "source": source,
             "rows": count, "start": str(first) if first else None,
             "end": str(last) if last else None, "missing": missing,
             "missing_ratio": missing / count if count else None,
-        })
+        }
+        if table == "etf_price":
+            row["checks"] = etf_checks(con)
+        rows.append(row)
     return rows
 
 

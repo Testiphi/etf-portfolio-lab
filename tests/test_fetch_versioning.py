@@ -15,8 +15,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from etf_lab.data import repo
+from etf_lab.data import audit
 from etf_lab.etl import fetch
 
 
@@ -82,3 +84,82 @@ def test_version_note_says_what_was_written(tmp_path: Path, monkeypatch) -> None
         assert "etf_price" in joined
     finally:
         con.close()
+
+
+@pytest.mark.parametrize("quality,status", [
+    (None, "本次未执行校验"),
+    ({"checked": False, "error": "offline"}, "校验未完成"),
+    ({"checked": True, "overlap": 6, "max_rel_diff": 0.0, "tolerance": .001}, "重叠区间一致（阈值内）"),
+    ({"checked": True, "overlap": 6, "max_rel_diff": .1, "tolerance": .001}, "重叠区间存在差异"),
+    ({"checked": True, "overlap": 6, "max_rel_diff": float("nan"), "tolerance": .001}, "校验结果不完整"),
+])
+def test_audit_distinguishes_outcomes_and_detects_changed_prices(monkeypatch, quality, status):
+    monkeypatch.setattr(fetch, "_fetch_pair", _canned_pair)
+    monkeypatch.setattr(fetch, "verify_against_sohu", lambda *args: quality)
+    con = repo.connect(":memory:")
+    try:
+        fetch.fetch_etf_prices(con, ["999999"])
+        assert audit.etf_checks(con)[0]["status"] == status
+        con.execute("UPDATE etf_price SET close_adj = close_adj * 2 WHERE symbol = '999999'")
+        assert audit.etf_checks(con)[0]["status"] == "库存已变化，记录过期"
+    finally:
+        con.close()
+
+
+def test_failed_audit_is_persisted_without_changing_prices_or_version(monkeypatch):
+    monkeypatch.setattr(fetch, "_fetch_pair", _canned_pair)
+    con = repo.connect(":memory:")
+    try:
+        fetch.fetch_etf_prices(con, ["999999"], verify=False)
+        version = repo.latest_data_version(con)
+        fingerprint = audit.etf_fingerprint(con, "999999")
+        def broken(*args):
+            raise RuntimeError("offline")
+        monkeypatch.setattr(fetch, "_fetch_pair", broken)
+        fetch.fetch_etf_prices(con, ["999999"])
+        assert repo.latest_data_version(con) == version
+        assert audit.etf_fingerprint(con, "999999") == fingerprint
+        assert audit.etf_checks(con)[0]["status"] == "最近采集失败"
+        assert con.execute("SELECT COUNT(*) FROM fetch_audit").fetchone()[0] == 2
+    finally:
+        con.close()
+
+
+def test_old_schema_remains_readable_without_audit_table():
+    con = repo.connect(":memory:")
+    try:
+        con.execute("DROP TABLE fetch_audit")
+        con.execute("INSERT INTO etf_price (symbol, date, close) VALUES ('AAA', '2020-01-01', 1)")
+        assert audit.etf_checks(con)[0]["status"] == "未保存校验记录"
+    finally:
+        con.close()
+
+
+def test_data_versions_are_distinct_even_at_the_same_clock_time(monkeypatch):
+    original = repo.dt.datetime
+    class Frozen(original):
+        @classmethod
+        def now(cls, tz=None):
+            return original(2026, 1, 1)
+    monkeypatch.setattr(repo.dt, "datetime", Frozen)
+    con = repo.connect(":memory:")
+    try:
+        versions = [repo.log_data_version(con, "test") for _ in range(3)]
+        assert len(set(versions)) == 3
+        assert repo.latest_data_version(con) == versions[-1]
+        assert con.execute("SELECT COUNT(*) FROM data_version").fetchone()[0] == 3
+    finally:
+        con.close()
+
+
+def test_verification_counts_only_finite_overlapping_prices(monkeypatch):
+    from types import SimpleNamespace
+    raw, _, _, _ = _canned_pair("x", "etf", None, None, None)
+    reference = raw.copy()
+    reference.loc[0, "close"] = float("nan")
+    reference.loc[1, "close"] = 0
+    monkeypatch.setattr(fetch.sohu, "fetch_daily", lambda *a, **k: SimpleNamespace(frame=reference))
+    result = fetch.verify_against_sohu("x", raw, None, None, None)
+    assert result["overlap"] == 4
+    assert result["first"] == str(raw.loc[2, "date"].date())
+    assert result["max_rel_diff"] == 0

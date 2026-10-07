@@ -13,6 +13,17 @@ CREATE TABLE IF NOT EXISTS data_version (
     notes       VARCHAR
 );
 
+-- 原始采集报告只在本地保存；ETF 指纹用于判断记录是否仍对应当前库存。
+CREATE TABLE IF NOT EXISTS fetch_audit (
+    audit_id VARCHAR PRIMARY KEY,
+    recorded_at TIMESTAMP,
+    data_version VARCHAR,
+    target VARCHAR,
+    symbol VARCHAR,
+    report_json VARCHAR,
+    snapshot_sha256 VARCHAR
+);
+
 CREATE TABLE IF NOT EXISTS etf_meta (
     symbol            VARCHAR PRIMARY KEY,
     name              VARCHAR,

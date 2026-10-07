@@ -28,9 +28,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Sequence
 
 import pandas as pd
+import numpy as np
 import requests
 
-from etf_lab.data import repo
+from etf_lab.data import audit, repo
 from etf_lab.etl import eastmoney, sohu, tencent
 from etf_lab.universe import ALL_INDEX_NAMES, ETF_PRESET, INDEX_PRESET, T_PLUS_BY_CLASS
 
@@ -117,7 +118,7 @@ def verify_against_sohu(
     这是本项目最重要的数据质量闸门：如果两个独立来源的原始收盘价对不上，
     那么后面所有的收益、回撤、对冲成本都建立在错误的价格上。
     """
-    result: dict[str, Any] = {"source": "sohu", "checked": False}
+    result: dict[str, Any] = {"source": "sohu", "checked": False, "tolerance": VERIFY_TOLERANCE}
     try:
         reference = sohu.fetch_daily(code, start=start, end=end, session=session)
     except Exception as exc:  # noqa: BLE001 - 校验失败不算抓取失败，但要如实记录
@@ -131,7 +132,13 @@ def verify_against_sohu(
         result["error"] = "与校验源没有重叠日期"
         return result
 
-    relative = ((merged["close_main"] - merged["close_sohu"]).abs() / merged["close_sohu"]).dropna()
+    merged = merged.loc[
+        np.isfinite(merged["close_main"]) & np.isfinite(merged["close_sohu"]) & (merged["close_sohu"] > 0)
+    ]
+    if merged.empty:
+        result["error"] = "重叠日期没有可校验的有效价格"
+        return result
+    relative = (merged["close_main"] - merged["close_sohu"]).abs() / merged["close_sohu"]
     result.update(
         checked=True,
         overlap=int(len(merged)),
@@ -162,9 +169,11 @@ def _bump_version(con, reports: Sequence[FetchReport], *, source: str, notes: st
     ``fetch_*`` 的脚本（我自己就踩过）都会漏掉这一步，而漏掉是**静默**的。
     把记账收进 ETL 后，"任何成功写入都伴随一次版本递增"这条不变量由构造保证。
     """
-    if not any(report.ok for report in reports):
-        return None
-    return repo.log_data_version(con, source=source, notes=notes)
+    version = None
+    if any(report.ok for report in reports):
+        version = repo.log_data_version(con, source=source, notes=notes)
+    audit.record_reports(con, report_to_dicts(reports), version)
+    return version
 
 
 def fetch_etf_prices(
@@ -248,7 +257,8 @@ def fetch_etf_prices(
                 "notes",
             ],
         )
-    _bump_version(con, reports, source="tencent+sohu(verify)", notes=f"etf_price: {len([r for r in reports if r.ok])} 只标的")
+    used_sources = "+".join(sorted({r.source for r in reports if r.ok and r.source})) or "unknown"
+    _bump_version(con, reports, source=used_sources + ("+sohu(verify)" if verify else ""), notes=f"etf_price: {len([r for r in reports if r.ok])} 只标的")
     return reports
 
 

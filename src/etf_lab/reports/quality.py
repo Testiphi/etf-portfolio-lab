@@ -62,6 +62,25 @@ def dataset_html(rows: Sequence[Mapping[str, Any]] | None) -> str:
         f'<tbody>{body}</tbody></table>'
         '<p class="note">关键值缺失 = 现有记录中价格、净值或收益率为空或非有限值的比例；'
         '不含未入库日期，不能据此断言数据完整。范围为整表覆盖，不代表每只标的都有同样长的历史。</p>'
-        '<p class="note">交叉校验状态：未保存可关联到当前快照的逐标的校验记录，无法确认本快照已通过。'
-        '采集配置不是逐条历史来源证明；最新日期也不等于已更新到最近交易日。</p>'
+        '<p class="note">采集配置不是逐条历史来源证明；最新日期也不等于已更新到最近交易日。</p>'
+        + audit_html(next((r.get("checks", []) for r in rows if r["table"] == "etf_price"), []))
+    )
+
+
+def audit_html(checks: Sequence[Mapping[str, Any]]) -> str:
+    if not checks:
+        return '<p class="note">未保存 ETF 逐标的校验记录。</p>'
+    body = "".join(
+        f'<tr><td>{theme.esc(r["symbol"])}</td><td>{theme.esc(r["status"])}</td>'
+        f'<td>{theme.esc(r["source"] or "—")}</td><td>{theme.esc(r["recorded_at"] or "—")}</td>'
+        f'<td>{theme.esc(r["first"] or "—")} ~ {theme.esc(r["last"] or "—")}</td>'
+        f'<td>{theme.esc(r["overlap"] if r["overlap"] is not None else "—")}</td>'
+        f'<td>{theme.pct(r["max_rel_diff"], digits=4)}</td></tr>' for r in checks
+    )
+    return (
+        '<h3>ETF 最近采集与交叉校验</h3><table><thead><tr><th>标的</th><th>状态</th>'
+        '<th>当次行情源</th><th>记录时间（UTC）</th><th>校验覆盖区间</th><th>有效重叠日</th>'
+        f'<th>最大相对差异</th></tr></thead><tbody>{body}</tbody></table>'
+        '<p class="note">仅比较当次采集与搜狐重叠日期的未复权收盘价；一致不代表整段历史、前复权价或收益计算已验证。'
+        '库存价格指纹变化后记录标为过期。未保存、未执行、未完成与失败均不能视为通过；失败不清除旧行情。</p>'
     )
